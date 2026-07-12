@@ -96,4 +96,3 @@ async def update_status():
                 details=f"Unable to check for updates: {error.__class__.__name__}.",
             )
         }
-
