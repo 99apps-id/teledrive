@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  web:
+    name: Web build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build web and shared packages
+        run: npm run build
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+  api:
+    name: API smoke check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile API
+        working-directory: apps/api
+        run: python -m compileall app
+
+      - name: Production secret guard accepts strong secrets
+        working-directory: apps/api
+        env:
+          APP_ENV: production
+          JWT_SECRET: 0123456789abcdef0123456789abcdef
+          ENCRYPTION_KEY: abcdef0123456789abcdef0123456789
+        run: python -c "from app.core.config import Settings; Settings()"

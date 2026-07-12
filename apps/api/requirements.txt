@@ -1,0 +1,35 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.3
+pydantic-settings==2.7.0
+
+# Database path, matching TeleCloud's direction. The starter API uses in-memory
+# metadata until migrations are introduced.
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+aiosqlite==0.20.0
+alembic==1.14.0
+
+# Worker/queue path for upload, download, and sync jobs.
+redis==5.2.1
+celery==5.4.0
+
+# Telegram user-account storage should use MTProto. Telethon is included for the
+# upcoming private-channel implementation; this API currently exposes the adapter
+# boundary without acting as a Telegram client.
+telethon==1.38.1
+
+python-jose[cryptography]==3.3.0
+bcrypt==4.2.1
+python-multipart==0.0.19
+cryptography==44.0.0
+paramiko==3.5.0
+httpx==0.28.1
+aiofiles==24.1.0
+structlog==24.4.0
+slowapi>=0.1.9
+email-validator==2.2.0
+
+pytest==8.3.4
+pytest-asyncio==0.25.0
+watchfiles==1.0.3

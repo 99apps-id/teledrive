@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: teledrive
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6381:6379"
+    volumes:
+      - redis_data:/data
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      APP_ENV: development
+      FRONTEND_URL: http://localhost:5173
+      JWT_SECRET: ${JWT_SECRET:-change-this-to-a-long-random-secret}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-change-this-to-a-long-random-secret}
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/teledrive
+      REDIS_URL: redis://redis:6379/0
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_SESSION: ${TELEGRAM_SESSION:-}
+      TELEDRIVE_STORAGE_CHANNEL: ${TELEDRIVE_STORAGE_CHANNEL:-TeleDrive Storage}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      - postgres
+      - redis
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/api/worker/Dockerfile
+    environment:
+      APP_ENV: development
+      JWT_SECRET: ${JWT_SECRET:-change-this-to-a-long-random-secret}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-change-this-to-a-long-random-secret}
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/teledrive
+      REDIS_URL: redis://redis:6379/0
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_SESSION: ${TELEGRAM_SESSION:-}
+      TELEDRIVE_STORAGE_CHANNEL: ${TELEDRIVE_STORAGE_CHANNEL:-TeleDrive Storage}
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  postgres_data:
+  redis_data:
