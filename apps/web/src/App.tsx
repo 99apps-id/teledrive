@@ -62,11 +62,14 @@ import {
   downloadFilesZip,
   downloadServerFile,
   getMe,
+  getRegistrationSettings,
   getServerFilesConfig,
   getServerFilesStatus,
   getStorageStatus,
+  getUpdateStatus,
   importServerFileToDrive,
   login,
+  logout as endSession,
   listFiles,
   listServerFiles,
   listTrash,
@@ -74,11 +77,13 @@ import {
   saveTelegramCredentials,
   saveTelegramSession,
   saveServerFilesConfig,
+  setCsrfToken,
   startTelegramLogin,
   syncFileToTelegram,
   testServerFilesConfig,
   updateDriveItem,
   updateAccount,
+  updateRegistrationSettings,
   updateServerFile,
   restoreFromTrash,
   emptyTrash,
@@ -173,9 +178,9 @@ const sortLabels: Record<SortMode, string> = {
 
 export function App() {
   const queryClient = useQueryClient();
-  const [token, setToken] = useState(() => localStorage.getItem("teledrive_token") ?? "");
-  const [email, setEmail] = useState("admin@example.com");
-  const [password, setPassword] = useState("password123");
+  const [token, setToken] = useState("session");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
   const [authError, setAuthError] = useState("");
   const [telegramApiId, setTelegramApiId] = useState("");
@@ -258,6 +263,13 @@ export function App() {
     retry: false,
   });
 
+  const registrationSettingsQuery = useQuery({
+    queryKey: ["registration-settings"],
+    queryFn: getRegistrationSettings,
+    enabled: Boolean(token) && Boolean(meQuery.data?.isOperator),
+    retry: false,
+  });
+
   const filesQuery = useQuery({
     queryKey: ["files", currentFolder.id],
     queryFn: () => listFiles(currentFolder.id),
@@ -286,6 +298,15 @@ export function App() {
     queryKey: ["server-files-config"],
     queryFn: getServerFilesConfig,
     enabled: Boolean(token),
+  });
+
+  const updateStatusQuery = useQuery({
+    queryKey: ["update-status"],
+    queryFn: getUpdateStatus,
+    enabled: Boolean(token),
+    refetchInterval: 60 * 60 * 1000,
+    staleTime: 15 * 60 * 1000,
+    retry: false,
   });
 
   const serverFilesQuery = useQuery({
@@ -320,6 +341,7 @@ export function App() {
   const rootItems = rootFilesQuery.data ?? [];
   const status = storageQuery.data;
   const serverStatus = serverStatusQuery.data;
+  const updateStatus = updateStatusQuery.data;
   const serverItems = serverFilesQuery.data ?? [];
   const serverSelectedItem = serverSelectedPath
     ? serverItems.find((item) => item.path === serverSelectedPath)
@@ -776,8 +798,8 @@ export function App() {
     mutationFn: () =>
       authMode === "register" ? register(email, password) : login(email, password),
     onSuccess: async (result) => {
-      localStorage.setItem("teledrive_token", result.token);
-      setToken(result.token);
+      setCsrfToken(result.csrfToken);
+      setToken("session");
       setAuthError("");
       await queryClient.invalidateQueries();
     },
@@ -860,6 +882,13 @@ export function App() {
     },
     onError: () => setAccountMessage("Account update failed. Check your current password."),
   });
+  const registrationSettingsMutation = useMutation({
+    mutationFn: updateRegistrationSettings,
+    onSuccess: async (registrationEnabled) => {
+      queryClient.setQueryData(["registration-settings"], registrationEnabled);
+      await queryClient.invalidateQueries({ queryKey: ["registration-settings"] });
+    },
+  });
   const actionError =
     createFileMutation.error ??
     syncMutation.error ??
@@ -891,7 +920,7 @@ export function App() {
   const actionErrorMessage = actionError instanceof Error ? actionError.message : "";
 
   function logout() {
-    localStorage.removeItem("teledrive_token");
+    void endSession();
     setToken("");
     setSelectedId(null);
     setSelectedIds([]);
@@ -993,6 +1022,7 @@ export function App() {
     setIsRefreshingStatus(true);
     try {
       await refreshFiles();
+      await queryClient.invalidateQueries({ queryKey: ["update-status"] });
       setStatusRefreshedAt(new Date());
     } finally {
       setIsRefreshingStatus(false);
@@ -1254,7 +1284,7 @@ export function App() {
     getCoreRowModel: getCoreRowModel(),
   });
 
-  if (!token) {
+  if (!token || meQuery.isError) {
     return (
       <main className="auth-shell">
         <form
@@ -1276,7 +1306,12 @@ export function App() {
           <h1>{authMode === "register" ? "Create admin account" : "Sign in"}</h1>
           <label>
             Email
-            <input value={email} onChange={(event) => setEmail(event.target.value)} />
+            <input
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              autoComplete="email"
+              placeholder="you@example.com"
+            />
           </label>
           <label>
             Password
@@ -1284,6 +1319,8 @@ export function App() {
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
+              autoComplete={authMode === "register" ? "new-password" : "current-password"}
+              placeholder="Enter a strong password"
             />
           </label>
           {authError && <p className="auth-error">{authError}</p>}
@@ -1631,6 +1668,21 @@ export function App() {
             <span className="status-detail">
               {status?.details ?? "Checking Telegram storage..."}
             </span>
+            {updateStatus?.updateAvailable && (
+              <a
+                className="update-pill"
+                href={updateStatus.releaseUrl ?? "#"}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(event) => {
+                  if (!updateStatus.releaseUrl) event.preventDefault();
+                }}
+              >
+                <RefreshCw size={14} />
+                Update available {updateStatus.latestVersion}
+                {updateStatus.releaseUrl && <ExternalLink size={13} />}
+              </a>
+            )}
             {actionErrorMessage && <span className="status-error">{actionErrorMessage}</span>}
           </div>
           <div className="metrics">
@@ -2334,6 +2386,33 @@ export function App() {
                     {accountMutation.isPending ? "Saving..." : "Save account settings"}
                   </button>
                 </form>
+                {meQuery.data?.isOperator && (
+                  <section className="account-form">
+                    <h3>Registration</h3>
+                    <p>
+                      {registrationSettingsQuery.data
+                        ? "New users can create an account."
+                        : "New user registration is disabled."}
+                    </p>
+                    <label className="selection-control">
+                      <input
+                        type="checkbox"
+                        checked={registrationSettingsQuery.data ?? false}
+                        disabled={
+                          registrationSettingsQuery.isLoading ||
+                          registrationSettingsMutation.isPending
+                        }
+                        onChange={(event) =>
+                          registrationSettingsMutation.mutate(event.target.checked)
+                        }
+                      />
+                      Allow new user registration
+                    </label>
+                    {registrationSettingsMutation.error && (
+                      <p className="account-message">Could not update registration settings.</p>
+                    )}
+                  </section>
+                )}
               </>
             )}
             {sidePanel === "setup" && (
@@ -2548,6 +2627,27 @@ export function App() {
                 </button>
                 <dl className="system-list">
                   <div>
+                    <dt>TeleDrive version</dt>
+                    <dd>{updateStatus?.currentVersion ?? "Checking..."}</dd>
+                  </div>
+                  <div>
+                    <dt>Latest release</dt>
+                    <dd>
+                      {updateStatus?.latestVersion ??
+                        (updateStatus?.checked ? "No release found" : "Not checked")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Update</dt>
+                    <dd>
+                      {updateStatus?.updateAvailable
+                        ? "Available"
+                        : updateStatus?.checked
+                          ? "Up to date"
+                          : updateStatus?.details ?? "Checking..."}
+                    </dd>
+                  </div>
+                  <div>
                     <dt>Provider</dt>
                     <dd>{status?.provider ?? "telegram-private-channel"}</dd>
                   </div>
@@ -2564,6 +2664,21 @@ export function App() {
                     <dd>{status?.details ?? "Checking..."}</dd>
                   </div>
                 </dl>
+                {updateStatus?.updateAvailable && (
+                  <a
+                    className="button wide update-link"
+                    href={updateStatus.releaseUrl ?? "#"}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(event) => {
+                      if (!updateStatus.releaseUrl) event.preventDefault();
+                    }}
+                  >
+                    <RefreshCw size={17} />
+                    View {updateStatus.releaseName ?? updateStatus.latestVersion}
+                    <ExternalLink size={16} />
+                  </a>
+                )}
                 <button
                   className="button wide"
                   type="button"

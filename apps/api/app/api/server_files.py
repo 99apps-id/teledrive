@@ -1,12 +1,13 @@
 from urllib.parse import quote
 import json
 
-from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
 from app.core.dependencies import get_current_user
+from app.core.rate_limit import limiter
 from app.core.security import encrypt_secret
 from app.core.config import settings
 from app.models.user import UserModel
@@ -61,7 +62,9 @@ async def save_server_files_config(
 
 
 @router.post("/server-files/config/test")
+@limiter.limit("5/minute")
 async def test_server_files_config(
+    request: Request,
     payload: ServerFilesConfigRequest,
     user: UserModel = Depends(get_current_user),
 ):
@@ -93,7 +96,9 @@ async def create_server_folder(
 
 
 @router.post("/server-files/upload", status_code=status.HTTP_201_CREATED)
+@limiter.limit("30/minute")
 async def upload_server_file(
+    request: Request,
     path: str = "",
     file: UploadFile = File(...),
     user: UserModel = Depends(get_current_user),
@@ -136,8 +141,13 @@ async def import_server_file_to_drive(
     session: AsyncSession = Depends(get_db_session),
 ):
     storage = create_server_files_storage(user)
-    filename, content = await storage.read_bytes(payload.path)
-    remote_id, size = await local_storage.save_bytes(content)
+    if isinstance(storage, LocalServerFiles):
+        source_path = await storage.download_path(payload.path)
+        filename = source_path.name
+        remote_id, size = await local_storage.save_path(source_path)
+    else:
+        filename, content = await storage.read_bytes(payload.path)
+        remote_id, size = await local_storage.save_bytes(content)
     repository = DriveRepository(session, settings.teledrive_storage_channel, user.id)
     item = await repository.create_file(
         filename,
@@ -165,7 +175,9 @@ async def update_server_file(
 
 
 @router.delete("/server-files", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("30/minute")
 async def delete_server_file(
+    request: Request,
     path: str = Query(...),
     user: UserModel = Depends(get_current_user),
 ):

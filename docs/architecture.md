@@ -1,8 +1,10 @@
 # TeleDrive Architecture
 
-## Product Boundary
+## Product Boundary and Operating Model
 
 TeleDrive is a file manager. Telegram is used only as a user-owned storage transport.
+
+The current alpha deployment model is a single trusted operator or a small trusted internal group. The operator is responsible for the host, TLS endpoint, encrypted credentials, database, backups, and any directories exposed through Server Files. This architecture is not a public, untrusted multi-tenant storage service.
 
 TeleDrive must not become a Telegram client:
 
@@ -58,12 +60,23 @@ The Telegram adapter is based on a user's Telegram account session, not a bot to
 - `TELEGRAM_API_HASH`
 - `TELEGRAM_SESSION`
 
-Server-level `.env` values for those keys are optional fallbacks for local development or admin-managed installs. Required server configuration:
+Server-level `.env` values for those keys are optional for the in-app setup flow. The production Docker deployment requires:
 
+- `FRONTEND_URL`
+- `API_URL`
+- `POSTGRES_PASSWORD`
+- `REDIS_PASSWORD`
+- `JWT_SECRET`
 - `ENCRYPTION_KEY`
 - `TELEDRIVE_STORAGE_CHANNEL`
 
 Each user can store their own encrypted Telegram API credentials and Telegram session through the API. The adapter should create or reuse the configured private channel. If the channel does not exist, the onboarding flow should ask permission to create it.
+
+## Production Deployment Topology
+
+`docker-compose.production.yml` uses a private Docker network for PostgreSQL, Redis, migration, API, and worker services. Only the non-root frontend nginx container binds to `127.0.0.1:8080`; a host reverse proxy terminates TLS and forwards traffic to that address. The API and worker run as an unprivileged application user.
+
+The one-shot migration service runs `alembic upgrade head` after PostgreSQL reports healthy. API and worker startup depends on that migration completing. PostgreSQL, Redis, local upload staging, and locally managed Server Files use named volumes. Backups must include PostgreSQL and the persistent application volumes, with restoration tested separately from production.
 
 ## Metadata
 

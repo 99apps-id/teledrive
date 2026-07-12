@@ -9,6 +9,7 @@ class AuthRequest(BaseModel):
 class UserResponse(BaseModel):
     id: str
     email: EmailStr
+    is_operator: bool
     has_telegram_api_credentials: bool
     has_telegram_session: bool
 
@@ -16,6 +17,7 @@ class UserResponse(BaseModel):
 class AuthResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    csrf_token: str
     user: UserResponse
 
 
@@ -23,6 +25,14 @@ class AccountUpdateRequest(BaseModel):
     current_password: str = Field(min_length=8)
     email: EmailStr | None = None
     new_password: str | None = Field(default=None, min_length=8)
+
+
+class RegistrationSettingsResponse(BaseModel):
+    registration_enabled: bool
+
+
+class RegistrationSettingsRequest(BaseModel):
+    registration_enabled: bool
 
 
 class TelegramSessionRequest(BaseModel):

@@ -7,18 +7,26 @@ import type {
 } from "@teledrive/shared";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
+function readCsrfCookie() {
+  return document.cookie
+    .split("; ")
+    .find((cookie) => cookie.startsWith("teledrive_csrf="))
+    ?.split("=")[1] ?? "";
+}
+
+let csrfToken = readCsrfCookie();
 
 const api = axios.create({
   baseURL: API_BASE,
+  withCredentials: true,
   headers: {
     "Content-Type": "application/json",
   },
 });
 
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("teledrive_token");
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+  if (csrfToken && !["get", "head", "options"].includes(config.method?.toLowerCase() ?? "")) {
+    config.headers["X-CSRF-Token"] = csrfToken;
   }
   return config;
 });
@@ -27,7 +35,7 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error?.response?.status === 401) {
-      localStorage.removeItem("teledrive_token");
+      csrfToken = "";
       window.dispatchEvent(new Event("teledrive:auth-expired"));
     }
     const detail = error?.response?.data?.detail;
@@ -41,6 +49,7 @@ api.interceptors.response.use(
 export interface AuthUser {
   id: string;
   email: string;
+  isOperator: boolean;
   hasTelegramApiCredentials: boolean;
   hasTelegramSession: boolean;
 }
@@ -89,9 +98,21 @@ export interface ServerFilesConfigPayload {
   sftpRoot: string;
 }
 
+export interface UpdateStatus {
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  releaseUrl: string | null;
+  releaseName: string | null;
+  publishedAt: string | null;
+  checked: boolean;
+  details: string;
+}
+
 interface PythonAuthUser {
   id: string;
   email: string;
+  is_operator: boolean;
   has_telegram_api_credentials: boolean;
   has_telegram_session: boolean;
 }
@@ -106,6 +127,7 @@ function mapUser(user: PythonAuthUser): AuthUser {
   return {
     id: user.id,
     email: user.email,
+    isOperator: user.is_operator,
     hasTelegramApiCredentials: user.has_telegram_api_credentials,
     hasTelegramSession: user.has_telegram_session,
   };
@@ -172,6 +194,17 @@ interface PythonServerFilesConfig {
   source: string;
 }
 
+interface PythonUpdateStatus {
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string | null;
+  release_name: string | null;
+  published_at: string | null;
+  checked: boolean;
+  details: string;
+}
+
 function mapDriveItem(item: PythonDriveItem): DriveItem {
   return {
     id: item.id,
@@ -235,6 +268,19 @@ function mapServerFilesConfig(config: PythonServerFilesConfig): ServerFilesConfi
   };
 }
 
+function mapUpdateStatus(status: PythonUpdateStatus): UpdateStatus {
+  return {
+    currentVersion: status.current_version,
+    latestVersion: status.latest_version,
+    updateAvailable: status.update_available,
+    releaseUrl: status.release_url,
+    releaseName: status.release_name,
+    publishedAt: status.published_at,
+    checked: status.checked,
+    details: status.details,
+  };
+}
+
 function serverFilesPayload(payload: ServerFilesConfigPayload) {
   return {
     mode: payload.mode,
@@ -257,30 +303,56 @@ export function listFiles(parentId: string | null = null) {
 
 export function register(email: string, password: string) {
   return api
-    .post<{ access_token: string; user: PythonAuthUser }>("/auth/register", {
+    .post<{ access_token: string; csrf_token: string; user: PythonAuthUser }>("/auth/register", {
       email,
       password,
     })
     .then((response) => ({
       token: response.data.access_token,
+      csrfToken: response.data.csrf_token,
       user: mapUser(response.data.user),
     }));
 }
 
 export function login(email: string, password: string) {
   return api
-    .post<{ access_token: string; user: PythonAuthUser }>("/auth/login", {
+    .post<{ access_token: string; csrf_token: string; user: PythonAuthUser }>("/auth/login", {
       email,
       password,
     })
     .then((response) => ({
       token: response.data.access_token,
+      csrfToken: response.data.csrf_token,
       user: mapUser(response.data.user),
     }));
 }
 
+export function setCsrfToken(token: string) {
+  csrfToken = token;
+}
+
+export function logout() {
+  return api.post<void>("/auth/logout").finally(() => {
+    csrfToken = "";
+  });
+}
+
 export function getMe() {
   return api.get<PythonAuthUser>("/auth/me").then((response) => mapUser(response.data));
+}
+
+export function getRegistrationSettings() {
+  return api
+    .get<{ registration_enabled: boolean }>("/auth/registration-settings")
+    .then((response) => response.data.registration_enabled);
+}
+
+export function updateRegistrationSettings(registrationEnabled: boolean) {
+  return api
+    .put<{ registration_enabled: boolean }>("/auth/registration-settings", {
+      registration_enabled: registrationEnabled,
+    })
+    .then((response) => response.data.registration_enabled);
 }
 
 export function updateAccount(payload: {
@@ -460,6 +532,12 @@ export function getServerFilesConfig() {
   return api
     .get<{ data: PythonServerFilesConfig }>("/server-files/config")
     .then((response) => mapServerFilesConfig(response.data.data));
+}
+
+export function getUpdateStatus() {
+  return api
+    .get<{ data: PythonUpdateStatus }>("/update/status")
+    .then((response) => mapUpdateStatus(response.data.data));
 }
 
 export function saveServerFilesConfig(payload: ServerFilesConfigPayload) {

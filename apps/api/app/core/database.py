@@ -25,8 +25,12 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
+    from app.models.app_setting import AppSettingModel
     from app.models.drive_item import DriveItemModel
     from app.models.user import UserModel
+
+    if not settings.debug:
+        return
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -60,6 +64,10 @@ async def init_db() -> None:
             if "server_files_config_encrypted" not in user_names:
                 await connection.execute(
                     text("ALTER TABLE users ADD COLUMN server_files_config_encrypted VARCHAR")
+                )
+            if "is_operator" not in user_names:
+                await connection.execute(
+                    text("ALTER TABLE users ADD COLUMN is_operator BOOLEAN NOT NULL DEFAULT 0")
                 )
 
             columns = await connection.execute(text("PRAGMA table_info(drive_items)"))
@@ -107,6 +115,9 @@ async def init_db() -> None:
             )
             await connection.execute(
                 text("ALTER TABLE users ADD COLUMN IF NOT EXISTS server_files_config_encrypted VARCHAR")
+            )
+            await connection.execute(
+                text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_operator BOOLEAN NOT NULL DEFAULT FALSE")
             )
             await connection.execute(
                 text("ALTER TABLE drive_items ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) NOT NULL DEFAULT 'local-dev-user'")

@@ -51,6 +51,74 @@ jobs:
         working-directory: apps/api
         run: python -m compileall app
 
+      - name: Run API test suite
+        working-directory: apps/api
+        env:
+          DATABASE_URL: sqlite+aiosqlite:////tmp/teledrive-tests.db
+          STORAGE_TEMP_PATH: /tmp/teledrive-test-storage
+          JWT_SECRET: 0123456789abcdef0123456789abcdef
+          ENCRYPTION_KEY: abcdef0123456789abcdef0123456789
+        run: python -m pytest
+
+      - name: Audit Python dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install pip-audit
+          python -m pip_audit -r requirements.txt
+
+      - name: Run fresh database migrations
+        working-directory: apps/api
+        env:
+          DATABASE_URL: sqlite+aiosqlite:////tmp/teledrive-ci.db
+        run: python -m alembic upgrade head
+
+      - name: API smoke test
+        working-directory: apps/api
+        env:
+          DATABASE_URL: sqlite+aiosqlite:////tmp/teledrive-smoke.db
+          STORAGE_TEMP_PATH: /tmp/teledrive-storage
+          JWT_SECRET: 0123456789abcdef0123456789abcdef
+          ENCRYPTION_KEY: abcdef0123456789abcdef0123456789
+        run: |
+          python - <<'PY'
+          import asyncio
+          import httpx
+
+          from app.core.database import close_db, init_db
+          from app.main import app
+
+          async def main():
+              await init_db()
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url="http://testserver/api") as client:
+                  denied = await client.get("/files")
+                  assert denied.status_code == 401
+                  register = await client.post(
+                      "/auth/register",
+                      json={"email": "ci@example.com", "password": "password123"},
+                  )
+                  assert register.status_code == 201, register.text
+                  token = register.json()["access_token"]
+                  headers = {"Authorization": f"Bearer {token}"}
+                  files = await client.get("/files", headers=headers)
+                  assert files.status_code == 200, files.text
+                  folder = await client.post(
+                      "/folders",
+                      json={"name": "CI", "parent_id": None},
+                      headers=headers,
+                  )
+                  assert folder.status_code == 201, folder.text
+                  upload = await client.post(
+                      "/files/upload",
+                      files={"file": ("ci.txt", b"ok", "text/plain")},
+                      headers=headers,
+                  )
+                  assert upload.status_code == 201, upload.text
+              await close_db()
+
+          asyncio.run(main())
+          PY
+
       - name: Production secret guard accepts strong secrets
         working-directory: apps/api
         env:
@@ -58,3 +126,15 @@ jobs:
           JWT_SECRET: 0123456789abcdef0123456789abcdef
           ENCRYPTION_KEY: abcdef0123456789abcdef0123456789
         run: python -c "from app.core.config import Settings; Settings()"
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan tracked content and history
+        uses: gitleaks/gitleaks-action@v2

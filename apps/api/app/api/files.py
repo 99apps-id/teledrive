@@ -5,13 +5,14 @@ from secrets import token_hex
 from urllib.parse import quote
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import SessionLocal, get_db_session
 from app.core.dependencies import get_current_user
+from app.core.rate_limit import limiter
 from app.core.security import decrypt_secret
 from app.models.user import UserModel
 from app.repositories.drive_repository import DriveRepository
@@ -145,7 +146,9 @@ def create_files_router(
         return {"data": item}
 
     @router.post("/files/upload", status_code=status.HTTP_201_CREATED)
+    @limiter.limit("30/minute")
     async def upload_file(
+        request: Request,
         background_tasks: BackgroundTasks,
         file: UploadFile = File(...),
         parent_id: str | None = Form(default=None),
@@ -204,7 +207,9 @@ def create_files_router(
         )
 
     @router.post("/files/download-zip")
+    @limiter.limit("10/minute")
     async def download_zip(
+        request: Request,
         payload: DownloadZipRequest,
         session: AsyncSession = Depends(get_db_session),
         user: UserModel = Depends(get_current_user),
@@ -213,10 +218,17 @@ def create_files_router(
         archive = BytesIO()
         used_names: set[str] = set()
         added_count = 0
+        total_size = 0
 
         with ZipFile(archive, "w", compression=ZIP_DEFLATED) as zip_file:
             for item_id in payload.item_ids:
                 item = await repo.get(item_id)
+                total_size += item.size
+                if total_size > settings.teledrive_max_archive_bytes:
+                    return Response(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        content="The selected files exceed the archive size limit",
+                    )
                 content, path = await read_file_bytes(item, user)
                 if content is None and path is None:
                     continue
@@ -252,13 +264,17 @@ def create_files_router(
         content, path = await read_file_bytes(item, user)
         if content is None and path is None:
             return Response(status_code=status.HTTP_404_NOT_FOUND, content="File bytes not found")
-        if content is None and path is not None:
-            content = path.read_bytes()
-        copied = await create_server_files_storage(user).write_bytes(
-            payload.server_path,
-            item.name,
-            content,
-        )
+        server_storage = create_server_files_storage(user)
+        if content is None and path is not None and hasattr(server_storage, "write_path"):
+            copied = await server_storage.write_path(payload.server_path, path, item.name)
+        else:
+            if content is None and path is not None:
+                content = path.read_bytes()
+            copied = await server_storage.write_bytes(
+                payload.server_path,
+                item.name,
+                content,
+            )
         return {"data": copied}
 
     @router.post("/files/{item_id}/sync")
@@ -318,7 +334,9 @@ def create_files_router(
         return {"data": await repository(session, user).restore(item_id)}
 
     @router.delete("/trash/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @limiter.limit("30/minute")
     async def delete_permanently(
+        request: Request,
         item_id: str,
         session: AsyncSession = Depends(get_db_session),
         user: UserModel = Depends(get_current_user),
@@ -332,7 +350,9 @@ def create_files_router(
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.delete("/trash", status_code=status.HTTP_204_NO_CONTENT)
+    @limiter.limit("10/minute")
     async def empty_trash(
+        request: Request,
         session: AsyncSession = Depends(get_db_session),
         user: UserModel = Depends(get_current_user),
     ):

@@ -58,7 +58,35 @@ class TelegramPrivateChannelStorage:
         return f"mtproto://{settings.teledrive_storage_channel}/{safe_name}-{size}"
 
     async def delete_object(self, remote_id: str | None) -> None:
-        return None
+        if not remote_id or remote_id.startswith("local://"):
+            return
+        if not remote_id.startswith("telegram://"):
+            raise RuntimeError("Telegram document reference is invalid")
+        try:
+            message_id = int(remote_id.rsplit("/", 1)[1])
+        except (IndexError, ValueError) as error:
+            raise RuntimeError("Telegram message reference is invalid") from error
+
+        api_id, api_hash, session = self._credentials()
+        if not api_id or not api_hash or not session:
+            raise RuntimeError("Telegram credentials are required to delete this document")
+
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        client = TelegramClient(StringSession(session), int(api_id), api_hash)
+        try:
+            await client.connect()
+            channel = None
+            async for dialog in client.iter_dialogs():
+                if getattr(dialog.entity, "title", None) == settings.teledrive_storage_channel:
+                    channel = dialog.entity
+                    break
+            if channel is None:
+                raise RuntimeError("TeleDrive Storage channel was not found")
+            await client.delete_messages(channel, [message_id], revoke=True)
+        finally:
+            await client.disconnect()
 
     async def upload_document(
         self,

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/99apps-id/teledrive/security/policy
+    about: Please report sensitive security issues privately, not in a public issue.

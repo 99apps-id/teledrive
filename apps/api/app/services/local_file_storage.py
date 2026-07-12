@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 from uuid import uuid4
 
 import aiofiles
@@ -19,19 +20,40 @@ class LocalFileStorage:
         target = self._path_for(object_id)
         size = 0
 
-        async with aiofiles.open(target, "wb") as output:
-            while chunk := await upload.read(1024 * 1024):
-                size += len(chunk)
-                await output.write(chunk)
+        try:
+            async with aiofiles.open(target, "wb") as output:
+                while chunk := await upload.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > settings.teledrive_max_upload_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Upload exceeds the {settings.teledrive_max_upload_bytes} byte limit",
+                        )
+                    await output.write(chunk)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
 
         return f"local://{object_id}", size
 
     async def save_bytes(self, content: bytes) -> tuple[str, int]:
+        if len(content) > settings.teledrive_max_upload_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Content exceeds the {settings.teledrive_max_upload_bytes} byte limit",
+            )
         object_id = str(uuid4())
         target = self._path_for(object_id)
         async with aiofiles.open(target, "wb") as output:
             await output.write(content)
         return f"local://{object_id}", len(content)
+
+    async def save_path(self, source: Path) -> tuple[str, int]:
+        object_id = str(uuid4())
+        target = self._path_for(object_id)
+        with source.open("rb") as input_file, target.open("wb") as output_file:
+            shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
+        return f"local://{object_id}", target.stat().st_size
 
     def resolve(self, remote_id: str | None) -> Path:
         if not remote_id or not remote_id.startswith("local://"):

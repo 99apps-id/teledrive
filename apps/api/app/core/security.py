@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import bcrypt
 from cryptography.fernet import Fernet
-from jose import JWTError, jwt
+import jwt
 
 from app.core.config import settings
 
@@ -21,7 +21,7 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def create_access_token(user_id: str) -> str:
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expire_minutes)
     payload = {
         "sub": user_id,
         "exp": expires_at,
@@ -33,7 +33,7 @@ def create_access_token(user_id: str) -> str:
 def decode_access_token(token: str) -> str | None:
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=[JWT_ALGORITHM])
-    except JWTError:
+    except jwt.InvalidTokenError:
         return None
     subject = payload.get("sub")
     return subject if isinstance(subject, str) else None

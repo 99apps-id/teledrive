@@ -602,6 +602,27 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+.update-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 3px 8px;
+  border: 1px solid #f3c45f;
+  border-radius: 999px;
+  background: #fff8df;
+  color: #8a5a00;
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.update-pill:hover {
+  border-color: #d99a00;
+  background: #fff0bd;
+}
+
 .metrics {
   white-space: nowrap;
 }
@@ -906,6 +927,12 @@ dd {
   width: 100%;
   border: 1px solid var(--border-strong);
   background: #ffffff;
+}
+
+.update-link {
+  max-width: 760px;
+  margin-bottom: 10px;
+  text-decoration: none;
 }
 
 .empty-state {

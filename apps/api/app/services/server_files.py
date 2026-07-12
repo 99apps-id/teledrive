@@ -100,9 +100,20 @@ class LocalServerFiles:
     async def upload(self, path: str, upload: UploadFile) -> ServerFileItem:
         name = _clean_name(upload.filename or "upload.bin")
         target = self._resolve(_child_path(path, name))
-        with target.open("wb") as output:
-            while chunk := await upload.read(1024 * 1024):
-                output.write(chunk)
+        size = 0
+        try:
+            with target.open("wb") as output:
+                while chunk := await upload.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > settings.teledrive_max_upload_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Upload exceeds the {settings.teledrive_max_upload_bytes} byte limit",
+                        )
+                    output.write(chunk)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
         return self._item_for(target)
 
     async def write_bytes(self, path: str, name: str, content: bytes) -> ServerFileItem:
@@ -112,6 +123,16 @@ class LocalServerFiles:
         target_name = _dedupe_name(name, lambda candidate: (folder / candidate).exists())
         target = folder / target_name
         target.write_bytes(content)
+        return self._item_for(target)
+
+    async def write_path(self, path: str, source: Path, name: str) -> ServerFileItem:
+        folder = self._resolve(path)
+        if not folder.is_dir():
+            raise HTTPException(status_code=400, detail="Destination must be a folder")
+        target_name = _dedupe_name(name, lambda candidate: (folder / candidate).exists())
+        target = folder / target_name
+        with source.open("rb") as input_file, target.open("wb") as output_file:
+            shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
         return self._item_for(target)
 
     async def read_bytes(self, path: str) -> tuple[str, bytes]:
@@ -183,6 +204,7 @@ class SftpConnectionConfig:
     password: str
     key_path: str
     root: str
+    allow_unknown_hosts: bool = False
 
 
 class SftpServerFiles:
@@ -207,7 +229,12 @@ class SftpServerFiles:
 
     async def upload(self, path: str, upload: UploadFile) -> ServerFileItem:
         name = _clean_name(upload.filename or "upload.bin")
-        content = await upload.read()
+        content = await upload.read(settings.teledrive_max_upload_bytes + 1)
+        if len(content) > settings.teledrive_max_upload_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload exceeds the {settings.teledrive_max_upload_bytes} byte limit",
+            )
         return await asyncio.to_thread(self._upload_sync, path, name, content)
 
     async def write_bytes(self, path: str, name: str, content: bytes) -> ServerFileItem:
@@ -244,7 +271,11 @@ class SftpServerFiles:
             raise HTTPException(status_code=400, detail="SFTP host and user are not configured")
 
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.load_system_host_keys()
+        if self.config.allow_unknown_hosts and settings.debug:
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        else:
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
         kwargs = {
             "hostname": self.config.host,
             "port": self.config.port,
@@ -412,6 +443,7 @@ def default_server_files_config() -> dict[str, object]:
         "sftp_password": settings.teledrive_server_files_sftp_password,
         "sftp_key_path": settings.teledrive_server_files_sftp_key_path,
         "sftp_root": settings.teledrive_server_files_sftp_root,
+        "sftp_allow_unknown_hosts": settings.teledrive_server_files_sftp_allow_unknown_hosts,
     }
 
 
@@ -420,7 +452,10 @@ def config_for_user(user: UserModel | None) -> tuple[dict[str, object], str]:
         try:
             config = json.loads(decrypt_secret(user.server_files_config_encrypted))
             if isinstance(config, dict):
-                return {**default_server_files_config(), **config}, "account"
+                merged = {**default_server_files_config(), **config}
+                if str(merged.get("mode") or "local").lower().strip() == "local":
+                    merged["local_root"] = settings.teledrive_server_files_root
+                return merged, "account"
         except (json.JSONDecodeError, ValueError):
             pass
     return default_server_files_config(), "environment"
@@ -429,7 +464,9 @@ def config_for_user(user: UserModel | None) -> tuple[dict[str, object], str]:
 def request_to_config(payload: ServerFilesConfigRequest) -> dict[str, object]:
     return {
         "mode": payload.mode,
-        "local_root": payload.local_root.strip() or "./server-files",
+        # The local filesystem is owned by the operator. Never accept a path
+        # selected by an authenticated web account.
+        "local_root": settings.teledrive_server_files_root,
         "sftp_host": payload.sftp_host.strip(),
         "sftp_port": payload.sftp_port,
         "sftp_user": payload.sftp_user.strip(),
@@ -468,6 +505,7 @@ def create_server_files_storage(
                 password=str(config.get("sftp_password") or ""),
                 key_path=str(config.get("sftp_key_path") or ""),
                 root=str(config.get("sftp_root") or "/home/admin"),
+                allow_unknown_hosts=bool(config.get("sftp_allow_unknown_hosts")),
             )
         )
     return LocalServerFiles(str(config.get("local_root") or "./server-files"))

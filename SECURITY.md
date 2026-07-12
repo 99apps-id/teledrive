@@ -43,6 +43,7 @@ Server Files can read and modify files from a configured local folder or SFTP ro
 - Restrict the root folder to a non-system path.
 - Do not point Server Files to `/`, `/etc`, `/root`, `C:\Windows`, or other system-critical paths.
 - Prefer SSH keys over passwords.
+- Keep SSH/SFTP host keys in `known_hosts`; unknown hosts are rejected by default.
 - Use least-privilege file permissions.
 
 ## Telegram Safety

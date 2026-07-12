@@ -7,6 +7,10 @@ TeleDrive is a self-hosted web file manager for private storage and server file 
 
 TeleDrive is not a Telegram client. It does not expose chats, contacts, groups, or social Telegram features. Telegram is used only as a document storage transport owned by the authenticated user.
 
+## Alpha Operating Model
+
+TeleDrive is an alpha release for a single trusted operator or a small, trusted internal group. The operator controls the host, database, encryption keys, backups, and the folders exposed through Server Files. Do not offer this deployment as a multi-tenant public file-hosting service, and do not expose it directly to the internet without a TLS-terminating reverse proxy and host firewall.
+
 ## Features
 
 - Local user login and registration.
@@ -287,6 +291,7 @@ Recommended deployment practices:
 - Restrict the Server Files root folder, for example `/var/lib/teledrive-files`.
 - Do not point the Server Files root to `/`, `/etc`, `/root`, or other system-critical folders.
 - Use a dedicated SSH key for TeleDrive.
+- Add the SFTP host to the OS `known_hosts` file before connecting. Unknown SFTP hosts are rejected by default.
 - Use strong `ENCRYPTION_KEY` and `JWT_SECRET` values in production.
 - Do not commit `.env`, local databases, storage folders, or session files.
 
@@ -308,13 +313,61 @@ python -m alembic upgrade head
 
 ## Docker
 
-The project includes a `docker-compose.yml` service layout.
+`docker-compose.yml` is a development-only service layout. It does not include the frontend proxy or production secret enforcement.
+
+The standalone production deployment is `docker-compose.production.yml`. It builds the React frontend into a non-root nginx container, keeps PostgreSQL, Redis, API, and worker on an internal Docker network, and exposes the web container only on `127.0.0.1:8080`. The API and worker run as an unprivileged `teledrive` user, and migrations complete before either service starts.
+
+1. Copy the example environment file and set the required production variables:
 
 ```bash
-docker compose up --build
+cp .env.example .env
 ```
 
-For production, set strong `JWT_SECRET` and `ENCRYPTION_KEY` values before starting containers.
+Required values are `FRONTEND_URL`, `API_URL`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `JWT_SECRET`, `ENCRYPTION_KEY`, and `TELEDRIVE_STORAGE_CHANNEL`. Generate distinct application secrets, for example:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+2. Start the deployment:
+
+```bash
+docker compose -f docker-compose.production.yml up --build -d
+docker compose -f docker-compose.production.yml ps
+```
+
+The production compose file intentionally has no secret fallbacks; Compose stops with an error if a required variable is missing. Never reuse the example values or commit the resulting `.env`.
+
+### Create the first operator account
+
+Production registration is disabled by default. To create the initial trusted operator:
+
+1. Set `TELEDRIVE_REGISTRATION_ENABLED=true` in `.env`.
+2. Restart the production stack and register the operator account with a unique password.
+3. Open **Account settings** in TeleDrive and turn off **Allow new user registration**.
+
+The first account is the operator account. It is the only account that can use the Account settings toggle to enable or disable registration later. The toggle is stored in the database and takes effect immediately; `TELEDRIVE_REGISTRATION_ENABLED` remains the initial default before an operator changes it.
+
+Do not leave registration enabled on an internet-accessible deployment.
+
+### TLS, reverse proxy, and resources
+
+Put a reverse proxy such as Caddy, nginx, or Traefik in front of `https://drive.example.com`, terminate TLS there, and proxy only to `http://127.0.0.1:8080`. Redirect HTTP to HTTPS, enable automatic certificate renewal, and set `FRONTEND_URL=https://drive.example.com` and `API_URL=https://drive.example.com/api`. Do not publish PostgreSQL, Redis, or the API port.
+
+Size the VPS according to upload volume and worker activity. Start with at least 2 CPU cores, 2 GB RAM, and disk capacity for PostgreSQL plus the local staging volume; increase memory and storage before sustained concurrent uploads. Configure host-level disk-space monitoring and container log rotation.
+
+### Backups and recovery
+
+The named volumes `postgres_data`, `redis_data`, `app_storage`, and `server_files` persist data. Back up PostgreSQL with `pg_dump` or `pg_basebackup`, retain a separate copy of `app_storage` while uploads may still be staged locally, and back up any data intentionally stored in `server_files`. Store encrypted, tested backups outside the host. Record the matching `.env` secrets securely: database backups cannot recover encrypted credentials without the original `ENCRYPTION_KEY`.
+
+Before upgrades, take a database backup, review the release notes, then run:
+
+```bash
+git pull --ff-only
+docker compose -f docker-compose.production.yml up --build -d
+```
+
+The migration container applies Alembic migrations on every deployment. Test restoring a backup into an isolated environment before relying on it.
 
 ## Troubleshooting
 
@@ -361,6 +414,7 @@ ENCRYPTION_KEY=replace-with-a-different-long-random-secret
 - `GET /api/files/:id/download`
 - `POST /api/files/download-zip`
 - `GET /api/trash`
+- `GET /api/update/status`
 - `GET /api/server-files`
 - `GET /api/server-files/status`
 - `GET /api/server-files/config`
@@ -374,7 +428,25 @@ ENCRYPTION_KEY=replace-with-a-different-long-random-secret
 - Auth: JWT, bcrypt, encrypted user secrets.
 - Telegram: Telethon MTProto user session.
 - Server Files: local filesystem or SSH/SFTP.
+- Update checks: GitHub Releases endpoint, configurable for forks.
+
+## Roadmap
+
+### V1
+
+- Web-based file manager.
+- API-first backend.
+- Telegram private channel storage per user account.
+- Server Files for local filesystem and SFTP access.
+
+### V2
+
+- Mount TeleDrive as an additional drive on a VPS, starting with WebDAV.
+- Add local cache and background sync for mounted-drive workflows.
+- Explore optional FUSE or rclone adapters after WebDAV is stable.
+
+TeleDrive mount support is planned as cloud-drive style file access, not block storage. It is intended for documents, media, archives, and backups, not active databases, VM images, or Docker volumes.
 
 ## Status
 
-TeleDrive is an active self-hosted project. It is suitable for personal or small internal use, especially 1-6 users, with restricted server configuration and regular backups.
+TeleDrive is an active alpha self-hosted project. It is intended for a single trusted operator or a small internal group with restricted server configuration, TLS, and tested backups. It is not yet suitable for untrusted public multi-user hosting.

@@ -4,6 +4,7 @@ import asyncio
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.security import decrypt_secret
+from app.models.user import UserModel
 from app.repositories.drive_repository import DriveRepository
 from app.services.local_file_storage import LocalFileStorage
 from app.services.sync_service import FileSyncService
@@ -25,37 +26,26 @@ def health() -> dict[str, str]:
 def sync_file(
     item_id: str,
     user_id: str,
-    telegram_session_encrypted: str | None = None,
-    telegram_api_id_encrypted: str | None = None,
-    telegram_api_hash_encrypted: str | None = None,
 ) -> dict[str, str | None]:
-    return asyncio.run(
-        _sync_file(
-            item_id,
-            user_id,
-            telegram_session_encrypted,
-            telegram_api_id_encrypted,
-            telegram_api_hash_encrypted,
-        )
-    )
+    return asyncio.run(_sync_file(item_id, user_id))
 
 
 async def _sync_file(
     item_id: str,
     user_id: str,
-    telegram_session_encrypted: str | None,
-    telegram_api_id_encrypted: str | None,
-    telegram_api_hash_encrypted: str | None,
 ) -> dict[str, str | None]:
     async with SessionLocal() as session:
+        user = await session.get(UserModel, user_id)
+        if user is None:
+            return {"id": item_id, "sync_status": "failed", "remote_id": None}
         repository = DriveRepository(session, settings.teledrive_storage_channel, user_id)
         service = FileSyncService(
             repository,
             LocalFileStorage(),
             TelegramPrivateChannelStorage(
-                telegram_session=decrypt_secret(telegram_session_encrypted),
-                telegram_api_id=decrypt_secret(telegram_api_id_encrypted),
-                telegram_api_hash=decrypt_secret(telegram_api_hash_encrypted),
+                telegram_session=decrypt_secret(user.telegram_session_encrypted),
+                telegram_api_id=decrypt_secret(user.telegram_api_id_encrypted),
+                telegram_api_hash=decrypt_secret(user.telegram_api_hash_encrypted),
             ),
         )
         item = await service.sync_file(item_id)

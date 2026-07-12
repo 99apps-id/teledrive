@@ -12,6 +12,7 @@ class UserModel(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    is_operator: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     drive_initialized: Mapped[bool] = mapped_column(Boolean, default=False)
     telegram_api_id_encrypted: Mapped[str | None] = mapped_column(String, nullable=True)
     telegram_api_hash_encrypted: Mapped[str | None] = mapped_column(String, nullable=True)
