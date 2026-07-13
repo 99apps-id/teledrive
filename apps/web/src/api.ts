@@ -15,6 +15,7 @@ function readCsrfCookie() {
 }
 
 let csrfToken = readCsrfCookie();
+let sessionActive = false;
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -34,17 +35,53 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error?.response?.status === 401) {
+    if (error?.response?.status === 401 && sessionActive) {
+      sessionActive = false;
       csrfToken = "";
       window.dispatchEvent(new Event("teledrive:auth-expired"));
     }
     const detail = error?.response?.data?.detail;
+    const status = error?.response?.status;
     if (typeof detail === "string" && detail) {
-      return Promise.reject(new Error(detail));
+      return Promise.reject(Object.assign(new Error(detail), { status }));
+    }
+    if (typeof status === "number") {
+      return Promise.reject(Object.assign(error instanceof Error ? error : new Error("Request failed"), { status }));
     }
     return Promise.reject(error);
   },
 );
+
+export function formatApiError(error: unknown, fallback: string): string {
+  const status = (error as { status?: number })?.status;
+  if (status === 404) {
+    return "API endpoint not found. Run npm run dev:clean && npm run dev, then retry.";
+  }
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return fallback;
+}
+
+export function formatAuthError(error: unknown): string {
+  const status = (error as { status?: number })?.status;
+  if (error instanceof Error && !status && error.message.toLowerCase().includes("network")) {
+    return "Cannot reach the API. Run npm run dev, then try again.";
+  }
+  if (status === 401) {
+    return "Invalid email or password.";
+  }
+  if (status === 403) {
+    return "Registration is disabled. Sign in with an existing account or ask the operator to enable registration.";
+  }
+  if (status === 409) {
+    return "This email is already registered. Sign in instead.";
+  }
+  if (status === 429) {
+    return "Too many attempts. Wait a minute, then try again.";
+  }
+  return formatApiError(error, "Authentication failed.");
+}
 
 export interface AuthUser {
   id: string;
@@ -66,6 +103,30 @@ export interface ServerFileItem {
   kind: "file" | "folder";
   size: number;
   modifiedAt: string | null;
+}
+
+export interface TextFileContent {
+  name: string;
+  content: string;
+  encoding: "utf-8" | "utf-8-bom" | "utf-16le" | "utf-16be" | "windows-1252";
+  newline: "lf" | "crlf";
+  revision?: string;
+}
+
+export interface SaveTextFilePayload {
+  content: string;
+  encoding: TextFileContent["encoding"];
+  newline: TextFileContent["newline"];
+  revision?: string;
+}
+
+export interface DeletionJob {
+  id: string;
+  status: string;
+  attempts: number;
+  nextAttemptAt: string;
+  lastError: string | null;
+  createdAt: string;
 }
 
 export interface ServerFilesStatus {
@@ -331,8 +392,26 @@ export function setCsrfToken(token: string) {
   csrfToken = token;
 }
 
+export function setSessionActive(active: boolean) {
+  sessionActive = active;
+}
+
+export async function bootstrapSession(): Promise<boolean> {
+  csrfToken = readCsrfCookie();
+  try {
+    await api.get<PythonAuthUser>("/auth/me");
+    sessionActive = true;
+    return true;
+  } catch {
+    sessionActive = false;
+    csrfToken = readCsrfCookie();
+    return false;
+  }
+}
+
 export function logout() {
   return api.post<void>("/auth/logout").finally(() => {
+    sessionActive = false;
     csrfToken = "";
   });
 }
@@ -425,7 +504,11 @@ export function createFile(payload: CreateFileRequest) {
     .then((response) => mapDriveItem(response.data.data));
 }
 
-export function uploadFile(file: File, parentId: string | null) {
+export function uploadFile(
+  file: File,
+  parentId: string | null,
+  onProgress?: (percentage: number) => void,
+) {
   const formData = new FormData();
   formData.append("file", file);
   if (parentId) formData.append("parent_id", parentId);
@@ -434,6 +517,9 @@ export function uploadFile(file: File, parentId: string | null) {
     .post<{ data: PythonDriveItem }>("/files/upload", formData, {
       headers: {
         "Content-Type": "multipart/form-data",
+      },
+      onUploadProgress: (event) => {
+        if (event.total) onProgress?.(Math.round((event.loaded / event.total) * 100));
       },
     })
     .then((response) => mapDriveItem(response.data.data));
@@ -500,11 +586,49 @@ export function restoreFromTrash(id: string) {
 }
 
 export function deletePermanently(id: string) {
-  return api.delete<void>(`/trash/${id}`).then(() => undefined);
+  return api.delete<{ job_ids: string[] }>(`/trash/${id}`).then((response) => response.data);
+}
+
+export function deletePermanentlyBulk(ids: string[]) {
+  return api
+    .post<{ job_ids: string[] }>("/trash/bulk-permanent", { item_ids: ids })
+    .then((response) => response.data);
 }
 
 export function emptyTrash() {
-  return api.delete<void>("/trash").then(() => undefined);
+  return api.delete<{ job_ids: string[] }>("/trash").then((response) => response.data);
+}
+
+export function listDeletionJobs(reconcile = false) {
+  return api
+    .get<{
+      data: Array<{
+        id: string;
+        status: string;
+        attempts: number;
+        next_attempt_at: string;
+        last_error: string | null;
+        created_at: string;
+      }>;
+    }>("/deletion-jobs", {
+      params: reconcile ? { reconcile: true } : undefined,
+    })
+    .then((response) =>
+      response.data.data.map((job) => ({
+        id: job.id,
+        status: job.status,
+        attempts: job.attempts,
+        nextAttemptAt: job.next_attempt_at,
+        lastError: job.last_error,
+        createdAt: job.created_at,
+      })),
+    );
+}
+
+export function retryDeletionJobs() {
+  return api
+    .post<{ data: { attempted: number; failed: number; completed: number } }>("/deletion-jobs/retry")
+    .then((response) => response.data.data);
 }
 
 export function updateDriveItem(id: string, payload: UpdateDriveItemRequest) {
@@ -532,6 +656,19 @@ export function getServerFilesConfig() {
   return api
     .get<{ data: PythonServerFilesConfig }>("/server-files/config")
     .then((response) => mapServerFilesConfig(response.data.data));
+}
+
+export interface DevStackStatus {
+  api: boolean;
+  redis: boolean;
+  worker: boolean;
+}
+
+export function getDevStackStatus() {
+  return api
+    .get<{ data: DevStackStatus }>("/dev/stack-status")
+    .then((response) => response.data.data)
+    .catch(() => ({ api: false, redis: false, worker: false }));
 }
 
 export function getUpdateStatus() {
@@ -570,7 +707,11 @@ export function createServerFolder(path: string, name: string) {
     .then((response) => mapServerFileItem(response.data.data));
 }
 
-export function uploadServerFile(path: string, file: File) {
+export function uploadServerFile(
+  path: string,
+  file: File,
+  onProgress?: (percentage: number) => void,
+) {
   const formData = new FormData();
   formData.append("file", file);
   return api
@@ -578,6 +719,9 @@ export function uploadServerFile(path: string, file: File) {
       params: { path },
       headers: {
         "Content-Type": "multipart/form-data",
+      },
+      onUploadProgress: (event) => {
+        if (event.total) onProgress?.(Math.round((event.loaded / event.total) * 100));
       },
     })
     .then((response) => mapServerFileItem(response.data.data));
@@ -619,4 +763,52 @@ export function importServerFileToDrive(path: string, parentId: string | null) {
       parent_id: parentId,
     })
     .then((response) => mapDriveItem(response.data.data));
+}
+
+export function readDriveTextFile(itemId: string) {
+  return api
+    .get<{ data: TextFileContent }>(`/files/${itemId}/text`)
+    .then((response) => response.data.data);
+}
+
+export function saveDriveTextFile(itemId: string, payload: SaveTextFilePayload) {
+  return api
+    .put<{ data: PythonDriveItem }>(`/files/${itemId}/text`, payload)
+    .then((response) => mapDriveItem(response.data.data));
+}
+
+export function readServerTextFile(path: string) {
+  return api
+    .get<{ data: TextFileContent }>("/server-files/text", { params: { path } })
+    .then((response) => response.data.data);
+}
+
+export function saveServerTextFile(path: string, payload: SaveTextFilePayload) {
+  return api
+    .put<{ data: TextFileContent }>("/server-files/text", payload, { params: { path } })
+    .then((response) => response.data.data);
+}
+
+export function createRecoveryManifest() {
+  return api.post<{ data: { id: string; created_at: string } }>("/recovery/manifests").then((response) => response.data.data);
+}
+
+export function restoreRecoveryManifest() {
+  return api.post<{ data: { restored: number } }>("/recovery/manifests/restore").then((response) => response.data.data);
+}
+
+export function cleanupStaleManifests() {
+  return api
+    .post<{ data: { removed: number } }>("/recovery/manifests/cleanup")
+    .then((response) => response.data.data);
+}
+
+export function purgeChannelStorage() {
+  return api
+    .post<{ data: { removed: number } }>("/recovery/channel-cleanup")
+    .then((response) => response.data.data);
+}
+
+export function importTelegramRecovery() {
+  return api.post<{ data: { items_processed: number } }>("/recovery/telegram-import").then((response) => response.data.data);
 }

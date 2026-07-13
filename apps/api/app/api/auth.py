@@ -17,6 +17,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.user import UserModel
+from app.services.telegram_credentials import effective_telegram_credentials
 from app.models.app_setting import AppSettingModel
 from app.core.config import settings
 from app.schemas.auth import (
@@ -37,23 +38,18 @@ router = APIRouter()
 
 
 def _user_response(user: UserModel) -> UserResponse:
+    telegram_session, telegram_api_id, telegram_api_hash = effective_telegram_credentials(user)
     return UserResponse(
         id=user.id,
         email=user.email,
         is_operator=user.is_operator,
-        has_telegram_api_credentials=bool(
-            user.telegram_api_id_encrypted
-            and user.telegram_api_hash_encrypted
-            or settings.telegram_api_id
-            and settings.telegram_api_hash
-        ),
-        has_telegram_session=bool(user.telegram_session_encrypted),
+        has_telegram_api_credentials=bool(telegram_api_id and telegram_api_hash),
+        has_telegram_session=bool(telegram_session),
     )
 
 
 def _telegram_credentials(user: UserModel) -> tuple[int, str]:
-    api_id = decrypt_secret(user.telegram_api_id_encrypted) or settings.telegram_api_id
-    api_hash = decrypt_secret(user.telegram_api_hash_encrypted) or settings.telegram_api_hash
+    _, api_id, api_hash = effective_telegram_credentials(user)
     if not api_id or not api_hash:
         raise HTTPException(
             status_code=400,

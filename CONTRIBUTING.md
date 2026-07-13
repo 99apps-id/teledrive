@@ -34,24 +34,43 @@ Copy-Item .env.example .env
 Start development:
 
 ```bash
+cp .env.example .env   # first time only
+npm run dev
+```
+
+For the full local stack (Redis via Docker, API, web UI, Celery worker, and Beat scheduler):
+
+```bash
+npm run dev:full
+```
+
+If Redis is already running on `localhost:6381`, `npm run dev` is enough.
+
+On Windows, if ports are stuck after a crash:
+
+```powershell
+npm run dev:clean
 npm run dev
 ```
 
 The default URLs are:
 
 - Web: `http://localhost:5173`
-- API: `http://localhost:8000`
+- API: `http://localhost:8001`
+- Redis: `localhost:6381` (when using Docker Compose)
+
+If `dev:full` fails because Docker is not installed or not in `PATH`, start Redis another way and run `npm run dev`.
 
 ## Quality Checks
 
 Run before opening a pull request:
 
 ```bash
+npm run check
 npm run build
-cd apps/api
-python -m compileall app
-cd ../..
 ```
+
+`npm run check` runs the TypeScript typecheck and the API pytest suite.
 
 Optional dependency audit:
 

@@ -21,11 +21,20 @@ services:
     restart: unless-stopped
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
-    command: ["sh", "-c", "redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
+    command:
+      [
+        "sh",
+        "-c",
+        'redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"',
+      ]
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      test:
+        [
+          "CMD-SHELL",
+          'redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG',
+        ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -41,9 +50,17 @@ services:
       FRONTEND_URL: ${FRONTEND_URL:?Set FRONTEND_URL to the public HTTPS URL}
       API_URL: ${API_URL:?Set API_URL to the public HTTPS API URL}
       DATABASE_URL: postgresql+asyncpg://teledrive:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/teledrive
-      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+      # An explicit REDIS_URL remains supported for externally managed Redis.
+      # Otherwise the app encodes REDIS_PASSWORD before composing the URL.
+      REDIS_URL: ${REDIS_URL:-}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
       STORAGE_TEMP_PATH: /app/storage
+      TELEDRIVE_MAX_EDITOR_BYTES: ${TELEDRIVE_MAX_EDITOR_BYTES:-5242880}
       TELEDRIVE_REGISTRATION_ENABLED: ${TELEDRIVE_REGISTRATION_ENABLED:-false}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:?Set TRUSTED_PROXY_CIDRS to the proxy network CIDR}
       TELEDRIVE_SERVER_FILES_ROOT: /app/server-files
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
@@ -70,7 +87,13 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -83,6 +106,7 @@ services:
       context: .
       dockerfile: apps/api/worker/Dockerfile
     restart: unless-stopped
+    command: celery -A app.worker.tasks worker --beat --loglevel=info
     environment: *api_environment
     volumes:
       - app_storage:/app/storage
@@ -92,6 +116,16 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.worker.tasks inspect ping -d celery@$$HOSTNAME --timeout=5 | grep -q pong",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     networks:
       - internal
 
@@ -106,7 +140,8 @@ services:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz | grep -q ok"]
+      test:
+        ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz | grep -q ok"]
       interval: 15s
       timeout: 5s
       retries: 5

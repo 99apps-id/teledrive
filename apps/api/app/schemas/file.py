@@ -53,6 +53,38 @@ class CopyDriveFileToServerRequest(BaseModel):
     server_path: str = ""
 
 
+class TextFileResponse(BaseModel):
+    name: str
+    content: str
+    encoding: str
+    newline: Literal["lf", "crlf"]
+    revision: datetime | None = None
+
+
+class SaveTextFileRequest(BaseModel):
+    content: str
+    encoding: Literal["utf-8", "utf-8-bom", "utf-16le", "utf-16be", "windows-1252"] = "utf-8"
+    newline: Literal["lf", "crlf"] = "lf"
+    revision: datetime | None = None
+
+
+class DeletionJobResponse(BaseModel):
+    id: str
+    status: str
+    attempts: int
+    next_attempt_at: datetime
+    last_error: str | None = None
+    created_at: datetime
+
+
+class DeletionQueueResponse(BaseModel):
+    job_ids: list[str]
+
+
+class BulkPermanentDeleteRequest(BaseModel):
+    item_ids: list[str] = Field(min_length=1, max_length=200)
+
+
 class StorageStatus(BaseModel):
     provider: StorageProvider = "telegram-private-channel"
     channel_name: str

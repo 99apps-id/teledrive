@@ -53,10 +53,14 @@ import {
 import {
   createFile,
   createFolder,
+  createRecoveryManifest,
+  cleanupStaleManifests,
+  purgeChannelStorage,
   createServerFolder,
   copyDriveFileToServer,
   deleteFile,
   deletePermanently,
+  deletePermanentlyBulk,
   deleteServerFile,
   downloadFile,
   downloadFilesZip,
@@ -71,13 +75,21 @@ import {
   login,
   logout as endSession,
   listFiles,
+  listDeletionJobs,
+  retryDeletionJobs,
   listServerFiles,
   listTrash,
   register,
+  readDriveTextFile,
+  readServerTextFile,
   saveTelegramCredentials,
   saveTelegramSession,
   saveServerFilesConfig,
+  saveDriveTextFile,
+  saveServerTextFile,
+  bootstrapSession,
   setCsrfToken,
+  setSessionActive,
   startTelegramLogin,
   syncFileToTelegram,
   testServerFilesConfig,
@@ -86,14 +98,24 @@ import {
   updateRegistrationSettings,
   updateServerFile,
   restoreFromTrash,
+  restoreRecoveryManifest,
+  importTelegramRecovery,
   emptyTrash,
+  formatApiError,
+  formatAuthError,
   uploadFile,
   uploadServerFile,
   verifyTelegramLogin,
   verifyTelegramPassword,
   type ServerFilesConfigPayload,
   type ServerFileItem,
+  type SaveTextFilePayload,
+  type TextFileContent,
 } from "./api";
+import { AuthScreen, type AuthMode } from "./AuthScreen";
+import { DeletionJobBanners } from "./DeletionJobBanners";
+import { DevHealthBadge } from "./DevHealthBadge";
+import { TextEditorDialog } from "./TextEditorDialog";
 
 function formatBytes(size: number) {
   if (size === 0) return "-";
@@ -168,6 +190,32 @@ type ContextMenu = { x: number; y: number; item: DriveItem } | null;
 type SortMode = "name" | "updated" | "size" | "sync";
 type ViewMode = "details" | "compact";
 type SidePanel = "files" | "server" | "trash" | "access" | "api" | "setup" | "account";
+type EditorTarget = (
+  | { source: "drive"; id: string; mimeType?: string | null }
+  | { source: "server"; path: string }
+) & { name: string; size: number };
+type EditorSave = { target: EditorTarget; payload: SaveTextFilePayload; revision?: string };
+
+const editableTextExtensions = new Set([
+  "bash", "c", "cc", "cfg", "conf", "cpp", "css", "csv", "env", "go", "h", "html", "ini",
+  "java", "js", "json", "jsx", "log", "md", "markdown", "php", "py", "rs", "sh", "sql",
+  "svg", "toml", "ts", "tsx", "txt", "xml", "yaml", "yml", "zsh",
+]);
+const maxEditorBytes = 5 * 1024 * 1024;
+
+function isEditableTextFile(item: { name: string; size: number; mimeType?: string | null }) {
+  const extension = item.name.split(".").pop()?.toLowerCase();
+  return item.size <= maxEditorBytes && (
+    editableTextExtensions.has(extension ?? "") || item.mimeType?.toLowerCase().startsWith("text/") === true
+  );
+}
+
+function sameEditorTarget(left: EditorTarget | null, right: EditorTarget) {
+  if (!left || left.source !== right.source) return false;
+  return left.source === "drive" && right.source === "drive"
+    ? left.id === right.id
+    : left.source === "server" && right.source === "server" && left.path === right.path;
+}
 
 const sortLabels: Record<SortMode, string> = {
   name: "Name",
@@ -178,10 +226,11 @@ const sortLabels: Record<SortMode, string> = {
 
 export function App() {
   const queryClient = useQueryClient();
-  const [token, setToken] = useState("session");
+  const [token, setToken] = useState("");
+  const [bootstrapping, setBootstrapping] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [authMode, setAuthMode] = useState<"login" | "register">("register");
+  const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authError, setAuthError] = useState("");
   const [telegramApiId, setTelegramApiId] = useState("");
   const [telegramApiHash, setTelegramApiHash] = useState("");
@@ -196,6 +245,7 @@ export function App() {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [accountMessage, setAccountMessage] = useState("");
+  const [recoveryMessage, setRecoveryMessage] = useState("");
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
   const [statusRefreshedAt, setStatusRefreshedAt] = useState<Date | null>(null);
   const [query, setQuery] = useState("");
@@ -216,6 +266,13 @@ export function App() {
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [trashSelectedIds, setTrashSelectedIds] = useState<string[]>([]);
   const [isBulkDownloading, setIsBulkDownloading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [deleteFeedback, setDeleteFeedback] = useState<
+    | { phase: "running"; current: number; total: number; label: string; indeterminate?: boolean }
+    | { phase: "success"; count: number; label: string }
+    | { phase: "error"; message: string }
+    | null
+  >(null);
   const [sortMode, setSortMode] = useState<SortMode>("name");
   const [viewMode, setViewMode] = useState<ViewMode>("details");
   const [showDetails, setShowDetails] = useState(true);
@@ -231,6 +288,11 @@ export function App() {
   const [serverDropTargetPath, setServerDropTargetPath] = useState<string | null>(null);
   const [showServerSetup, setShowServerSetup] = useState(false);
   const [serverSetupMessage, setServerSetupMessage] = useState("");
+  const [editorTarget, setEditorTarget] = useState<EditorTarget | null>(null);
+  const [editorDocument, setEditorDocument] = useState<TextFileContent | null>(null);
+  const [editorError, setEditorError] = useState("");
+  const [editorLoading, setEditorLoading] = useState(false);
+  const [editorConflict, setEditorConflict] = useState(false);
   const [serverConfigForm, setServerConfigForm] = useState<ServerFilesConfigPayload>({
     mode: "sftp",
     localRoot: "./server-files",
@@ -244,9 +306,26 @@ export function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const serverFileInputRef = useRef<HTMLInputElement | null>(null);
   const navigationTargetRef = useRef<string | null>(null);
+  const editorRequestRef = useRef(0);
+  const lastDriveSelectionIndexRef = useRef<number | null>(null);
+  const lastTrashSelectionIndexRef = useRef<number | null>(null);
+  const lastServerSelectionIndexRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void bootstrapSession().then((authenticated) => {
+      if (cancelled) return;
+      setToken(authenticated ? "session" : "");
+      setBootstrapping(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const handleAuthExpired = () => {
+      setSessionActive(false);
       setToken("");
       setSelectedId(null);
       setSelectedIds([]);
@@ -263,11 +342,24 @@ export function App() {
     retry: false,
   });
 
+  useEffect(() => {
+    if (sidePanel === "server" && meQuery.data && !meQuery.data.isOperator) {
+      setSidePanel("files");
+    }
+  }, [meQuery.data, sidePanel]);
+
   const registrationSettingsQuery = useQuery({
     queryKey: ["registration-settings"],
     queryFn: getRegistrationSettings,
     enabled: Boolean(token) && Boolean(meQuery.data?.isOperator),
     retry: false,
+  });
+  const deletionJobsQuery = useQuery({
+    queryKey: ["deletion-jobs", sidePanel === "trash"],
+    queryFn: () => listDeletionJobs(sidePanel === "trash"),
+    enabled: Boolean(token) && (sidePanel === "trash" || sidePanel === "account"),
+    refetchInterval: sidePanel === "trash" ? 15_000 : false,
+    staleTime: 10_000,
   });
 
   const filesQuery = useQuery({
@@ -355,6 +447,12 @@ export function App() {
     serverItems.every((item) => serverSelectedPaths.includes(item.path));
   const serverParentPath = parentServerPath(serverPath);
   const trashItems = trashQuery.data ?? [];
+  const pendingDeletionJobs = (deletionJobsQuery.data ?? []).filter(
+    (job) => job.status === "pending" || job.status === "processing" || job.status === "failed",
+  );
+  const failedDeletionJobs = pendingDeletionJobs.filter((job) => job.status === "failed");
+  const processingDeletionJobs = pendingDeletionJobs.filter((job) => job.status === "processing");
+  const queuedDeletionJobs = pendingDeletionJobs.filter((job) => job.status === "pending");
   const trashSelectedItems = trashItems.filter((item) =>
     trashSelectedIds.includes(item.id),
   );
@@ -482,41 +580,76 @@ export function App() {
   });
 
   const createFileMutation = useMutation({
-    mutationFn: (file?: globalThis.File) =>
-      file
-        ? uploadFile(file, currentFolder.id)
-        : createFile({
+    mutationFn: (file?: globalThis.File) => {
+      if (file) {
+        setUploadProgress(0);
+        return uploadFile(file, currentFolder.id, setUploadProgress);
+      }
+      return createFile({
             name: `Untitled upload ${items.length + 1}.bin`,
             size: 0,
             mimeType: "application/octet-stream",
             parentId: currentFolder.id,
-          }),
+          });
+    },
     onSuccess: async (file) => {
+      setUploadProgress(null);
       setSelectedId(file.id);
       setSelectedIds([file.id]);
       await refreshFiles();
       window.setTimeout(() => void refreshFiles(), 1500);
     },
+    onError: () => setUploadProgress(null),
   });
 
   const deleteFileMutation = useMutation({
     mutationFn: deleteFile,
+    onMutate: () => {
+      setDeleteFeedback({ phase: "running", current: 0, total: 1, label: "Moving to Trash" });
+    },
     onSuccess: async (_result, deletedId) => {
       if (selectedId === deletedId) setSelectedId(null);
       setSelectedIds((current) => current.filter((id) => id !== deletedId));
       setContextMenu(null);
       await refreshFiles();
       await queryClient.invalidateQueries({ queryKey: ["trash"] });
+      setDeleteFeedback({ phase: "success", count: 1, label: "Moved to Trash" });
+      window.setTimeout(() => setDeleteFeedback(null), 4000);
+    },
+    onError: (error) => {
+      setDeleteFeedback({
+        phase: "error",
+        message: error instanceof Error ? error.message : "Could not move the item to Trash",
+      });
     },
   });
 
   const bulkDeleteMutation = useMutation({
-    mutationFn: (ids: string[]) => Promise.all(ids.map(deleteFile)),
-    onSuccess: async () => {
+    mutationFn: async (ids: string[]) => {
+      setDeleteFeedback({ phase: "running", current: 0, total: ids.length, label: "Moving to Trash" });
+      for (let index = 0; index < ids.length; index += 1) {
+        await deleteFile(ids[index]);
+        setDeleteFeedback({
+          phase: "running",
+          current: index + 1,
+          total: ids.length,
+          label: "Moving to Trash",
+        });
+      }
+    },
+    onSuccess: async (_result, ids) => {
       setSelectedId(null);
       setSelectedIds([]);
       await refreshFiles();
       await queryClient.invalidateQueries({ queryKey: ["trash"] });
+      setDeleteFeedback({ phase: "success", count: ids.length, label: "Moved to Trash" });
+      window.setTimeout(() => setDeleteFeedback(null), 4000);
+    },
+    onError: (error) => {
+      setDeleteFeedback({
+        phase: "error",
+        message: error instanceof Error ? error.message : "Could not move the selected items to Trash",
+      });
     },
   });
 
@@ -570,18 +703,83 @@ export function App() {
   });
 
   const bulkPermanentDeleteMutation = useMutation({
-    mutationFn: (ids: string[]) => Promise.all(ids.map(deletePermanently)),
-    onSuccess: async () => {
+    mutationFn: async (ids: string[]) => {
+      setDeleteFeedback({
+        phase: "running",
+        current: 0,
+        total: ids.length,
+        label: "Deleting permanently",
+        indeterminate: ids.length > 3,
+      });
+      const result =
+        ids.length === trashItems.length
+          ? await emptyTrash()
+          : ids.length === 1
+            ? await deletePermanently(ids[0])
+            : await deletePermanentlyBulk(ids);
+      return { count: ids.length, telegramCleanupJobs: result.job_ids.length };
+    },
+    onSuccess: async ({ count, telegramCleanupJobs }) => {
       setTrashSelectedIds([]);
-      await queryClient.invalidateQueries({ queryKey: ["trash"] });
+      void queryClient.invalidateQueries({ queryKey: ["trash"] });
+      void queryClient.invalidateQueries({ queryKey: ["deletion-jobs"] });
+      setDeleteFeedback({
+        phase: "success",
+        count: 1,
+        label: telegramCleanupJobs
+          ? `Deleted permanently (${telegramCleanupJobs} Telegram file${telegramCleanupJobs === 1 ? "" : "s"} cleaning up)`
+          : count > 1
+            ? `Deleted permanently: ${count} items`
+            : "Deleted permanently",
+      });
+      window.setTimeout(() => setDeleteFeedback(null), 6000);
+    },
+    onError: (error) => {
+      setDeleteFeedback({
+        phase: "error",
+        message: error instanceof Error ? error.message : "Could not delete the selected items",
+      });
     },
   });
 
   const emptyTrashMutation = useMutation({
     mutationFn: emptyTrash,
-    onSuccess: async () => {
+    onMutate: async () => {
+      const count = trashItems.length;
+      await queryClient.cancelQueries({ queryKey: ["trash"] });
+      const previousTrash = queryClient.getQueryData<DriveItem[]>(["trash"]);
+      queryClient.setQueryData(["trash"], []);
       setTrashSelectedIds([]);
-      await queryClient.invalidateQueries({ queryKey: ["trash"] });
+      setDeleteFeedback({
+        phase: "running",
+        current: 0,
+        total: count,
+        label: "Emptying trash",
+        indeterminate: true,
+      });
+      return { previousTrash, count };
+    },
+    onSuccess: async (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["trash"] });
+      void queryClient.invalidateQueries({ queryKey: ["deletion-jobs"] });
+      const telegramCleanupJobs = result.job_ids.length;
+      setDeleteFeedback({
+        phase: "success",
+        count: 1,
+        label: telegramCleanupJobs
+          ? `Trash emptied (${telegramCleanupJobs} Telegram file${telegramCleanupJobs === 1 ? "" : "s"} cleaning up)`
+          : "Trash emptied",
+      });
+      window.setTimeout(() => setDeleteFeedback(null), 4000);
+    },
+    onError: (error, _variables, context) => {
+      if (context?.previousTrash) {
+        queryClient.setQueryData(["trash"], context.previousTrash);
+      }
+      setDeleteFeedback({
+        phase: "error",
+        message: error instanceof Error ? error.message : "Could not empty Trash",
+      });
     },
   });
 
@@ -596,11 +794,16 @@ export function App() {
   });
 
   const uploadServerFileMutation = useMutation({
-    mutationFn: (file: globalThis.File) => uploadServerFile(serverPath, file),
+    mutationFn: (file: globalThis.File) => {
+      setUploadProgress(0);
+      return uploadServerFile(serverPath, file, setUploadProgress);
+    },
     onSuccess: async (file) => {
+      setUploadProgress(null);
       setServerSelectedPath(file.path);
       await queryClient.invalidateQueries({ queryKey: ["server-files"] });
     },
+    onError: () => setUploadProgress(null),
   });
 
   const renameServerFileMutation = useMutation({
@@ -665,6 +868,75 @@ export function App() {
       URL.revokeObjectURL(url);
     },
   });
+
+  const saveEditorMutation = useMutation<{ revision: string } | TextFileContent, Error, EditorSave>({
+    mutationFn: ({ target, payload, revision }: EditorSave) => {
+      return target.source === "drive"
+        ? saveDriveTextFile(target.id, {
+            ...payload,
+            revision,
+          }).then((item) => ({ revision: item.updatedAt }))
+        : saveServerTextFile(target.path, payload);
+    },
+    onSuccess: async (result, { target, payload }) => {
+      if (target.source === "drive") await refreshFiles();
+      if (target.source === "server") await queryClient.invalidateQueries({ queryKey: ["server-files"] });
+      if (sameEditorTarget(editorTarget, target)) {
+        setEditorDocument((current) => current && {
+          ...current,
+          content: payload.content,
+          encoding: payload.encoding,
+          newline: payload.newline,
+          revision: target.source === "drive" ? result.revision : result.revision ?? current.revision,
+        });
+      }
+      setEditorError("");
+      setEditorConflict(false);
+    },
+    onError: (error) => {
+      const status = error instanceof Error ? (error as Error & { status?: number }).status : undefined;
+      if (status === 409) {
+        setEditorConflict(true);
+        setEditorError("This file changed elsewhere. Reload the latest version before saving again.");
+        return;
+      }
+      setEditorConflict(false);
+      setEditorError(error instanceof Error ? error.message : "Could not save the file");
+    },
+  });
+
+  async function openTextEditor(target: EditorTarget) {
+    if (!isEditableTextFile(target)) {
+      setEditorTarget(target);
+      setEditorDocument(null);
+      setEditorLoading(false);
+      setEditorConflict(false);
+      setEditorError(
+        target.size > maxEditorBytes
+          ? "This file is too large for the text editor."
+          : "This file type cannot be opened in the text editor.",
+      );
+      return;
+    }
+    const request = ++editorRequestRef.current;
+    setEditorError("");
+    setEditorConflict(false);
+    setEditorTarget(target);
+    setEditorDocument(null);
+    setEditorLoading(true);
+    try {
+      const document = target.source === "drive"
+        ? await readDriveTextFile(target.id)
+        : await readServerTextFile(target.path);
+      if (request !== editorRequestRef.current) return;
+      setEditorDocument(document);
+    } catch (error) {
+      if (request !== editorRequestRef.current) return;
+      setEditorError(error instanceof Error ? error.message : "This file cannot be opened in the editor");
+    } finally {
+      if (request === editorRequestRef.current) setEditorLoading(false);
+    }
+  }
 
   const copyDriveFilesToServerMutation = useMutation({
     mutationFn: (files: DriveItem[]) =>
@@ -799,12 +1071,14 @@ export function App() {
       authMode === "register" ? register(email, password) : login(email, password),
     onSuccess: async (result) => {
       setCsrfToken(result.csrfToken);
+      setSessionActive(true);
       setToken("session");
       setAuthError("");
+      await queryClient.cancelQueries();
       await queryClient.invalidateQueries();
     },
     onError: (error) => {
-      setAuthError(error instanceof Error ? error.message : "Authentication failed");
+      setAuthError(formatAuthError(error));
     },
   });
 
@@ -889,14 +1163,71 @@ export function App() {
       await queryClient.invalidateQueries({ queryKey: ["registration-settings"] });
     },
   });
+  const createManifestMutation = useMutation({
+    mutationFn: createRecoveryManifest,
+    onSuccess: () => setRecoveryMessage("Encrypted recovery manifest saved to Telegram."),
+    onError: (error) => setRecoveryMessage(error instanceof Error ? error.message : "Could not create a manifest."),
+  });
+  const restoreManifestMutation = useMutation({
+    mutationFn: restoreRecoveryManifest,
+    onSuccess: async ({ restored }) => {
+      setRecoveryMessage(`Restored ${restored} missing item${restored === 1 ? "" : "s"} from Telegram.`);
+      await queryClient.invalidateQueries({ queryKey: ["files"] });
+    },
+    onError: (error) => setRecoveryMessage(error instanceof Error ? error.message : "Could not restore the manifest."),
+  });
+  const importTelegramRecoveryMutation = useMutation({
+    mutationFn: importTelegramRecovery,
+    onSuccess: async ({ items_processed }) => {
+      setRecoveryMessage(`Imported ${items_processed} Telegram document${items_processed === 1 ? "" : "s"}.`);
+      await queryClient.invalidateQueries({ queryKey: ["files"] });
+    },
+    onError: (error) => setRecoveryMessage(error instanceof Error ? error.message : "Could not import Telegram documents."),
+  });
+  const cleanupManifestsMutation = useMutation({
+    mutationFn: cleanupStaleManifests,
+    onSuccess: async ({ removed }) => {
+      setRecoveryMessage(
+        removed
+          ? `Removed ${removed} old manifest file${removed === 1 ? "" : "s"} from Telegram storage.`
+          : "No extra manifest files found in Telegram storage.",
+      );
+      await queryClient.invalidateQueries({ queryKey: ["deletion-jobs"] });
+    },
+    onError: (error) =>
+      setRecoveryMessage(formatApiError(error, "Could not clean up manifest files.")),
+  });
+  const purgeChannelMutation = useMutation({
+    mutationFn: purgeChannelStorage,
+    onSuccess: async ({ removed }) => {
+      setRecoveryMessage(
+        removed
+          ? `Removed ${removed} file${removed === 1 ? "" : "s"} from Telegram storage channel.`
+          : "Telegram storage channel is already empty.",
+      );
+      await queryClient.invalidateQueries({ queryKey: ["deletion-jobs"] });
+    },
+    onError: (error) =>
+      setRecoveryMessage(formatApiError(error, "Could not clean up Telegram storage channel.")),
+  });
+  const retryDeletionJobsMutation = useMutation({
+    mutationFn: retryDeletionJobs,
+    onSuccess: async ({ attempted, failed, completed }) => {
+      setRecoveryMessage(
+        failed
+          ? `Telegram cleanup retried ${attempted} file(s): ${completed} removed, ${failed} still failing.`
+          : `Telegram cleanup removed ${completed} file${completed === 1 ? "" : "s"} from storage.`,
+      );
+      await queryClient.invalidateQueries({ queryKey: ["deletion-jobs"] });
+    },
+    onError: (error) =>
+      setRecoveryMessage(formatApiError(error, "Could not retry Telegram cleanup.")),
+  });
   const actionError =
     createFileMutation.error ??
     syncMutation.error ??
-    deleteFileMutation.error ??
-    bulkDeleteMutation.error ??
     renameMutation.error ??
     moveMutation.error ??
-    emptyTrashMutation.error ??
     downloadMutation.error ??
     createServerFolderMutation.error ??
     uploadServerFileMutation.error ??
@@ -911,19 +1242,53 @@ export function App() {
     testServerConfigMutation.error ??
     saveServerConfigMutation.error ??
     bulkRestoreMutation.error ??
-    bulkPermanentDeleteMutation.error ??
     telegramCredentialsMutation.error ??
     telegramLoginStartMutation.error ??
     telegramLoginVerifyMutation.error ??
     telegramSessionMutation.error ??
     accountMutation.error;
   const actionErrorMessage = actionError instanceof Error ? actionError.message : "";
+  const isDriveDeleting = deleteFileMutation.isPending || bulkDeleteMutation.isPending;
+  const isTrashDeleting =
+    bulkPermanentDeleteMutation.isPending || emptyTrashMutation.isPending;
+
+  function renderDeleteFeedback() {
+    if (!deleteFeedback) return null;
+    if (deleteFeedback.phase === "running") {
+      const progressLabel = deleteFeedback.indeterminate
+        ? deleteFeedback.total > 0
+          ? `${deleteFeedback.label} (${deleteFeedback.total} items)...`
+          : `${deleteFeedback.label}...`
+        : `${deleteFeedback.label} ${deleteFeedback.current}/${deleteFeedback.total}...`;
+      return (
+        <span className="status-detail delete-feedback">
+          <RefreshCw size={14} className="spinning" />
+          {progressLabel}
+        </span>
+      );
+    }
+    if (deleteFeedback.phase === "success") {
+      const detail =
+        deleteFeedback.count > 1
+          ? `${deleteFeedback.label}: ${deleteFeedback.count} items`
+          : deleteFeedback.label;
+      return (
+        <span className="status-success">
+          <CheckCircle2 size={14} />
+          {detail}
+        </span>
+      );
+    }
+    return <span className="status-error">{deleteFeedback.message}</span>;
+  }
 
   function logout() {
     void endSession();
+    setSessionActive(false);
     setToken("");
     setSelectedId(null);
     setSelectedIds([]);
+    setDeleteFeedback(null);
     void queryClient.clear();
   }
 
@@ -959,7 +1324,43 @@ export function App() {
     setSelectedIds([item.id]);
   }
 
+  function handleDriveItemClick(item: DriveItem, event: MouseEvent<HTMLElement>) {
+    const index = filteredItems.findIndex((entry) => entry.id === item.id);
+    if (event.ctrlKey || event.metaKey) {
+      toggleItemSelection(item);
+      if (index >= 0) lastDriveSelectionIndexRef.current = index;
+      return;
+    }
+    if (
+      event.shiftKey &&
+      lastDriveSelectionIndexRef.current !== null &&
+      index >= 0
+    ) {
+      const anchor = lastDriveSelectionIndexRef.current;
+      const start = Math.min(anchor, index);
+      const end = Math.max(anchor, index);
+      const rangeIds = filteredItems.slice(start, end + 1).map((entry) => entry.id);
+      setSelectedIds(rangeIds);
+      setSelectedId(item.id);
+      return;
+    }
+    selectOnly(item);
+    if (index >= 0) lastDriveSelectionIndexRef.current = index;
+  }
+
+  function requestBulkDelete() {
+    if (!selectedIds.length || isDriveDeleting) return;
+    if (
+      selectedIds.length > 1 &&
+      !window.confirm(`Move ${selectedIds.length} selected items to Trash?`)
+    ) {
+      return;
+    }
+    bulkDeleteMutation.mutate(selectedIds);
+  }
+
   function toggleItemSelection(item: DriveItem) {
+    const index = filteredItems.findIndex((entry) => entry.id === item.id);
     setSelectedIds((current) => {
       const next = current.includes(item.id)
         ? current.filter((id) => id !== item.id)
@@ -967,6 +1368,7 @@ export function App() {
       setSelectedId(next.includes(item.id) ? item.id : (next[next.length - 1] ?? null));
       return next;
     });
+    if (index >= 0) lastDriveSelectionIndexRef.current = index;
   }
 
   function toggleTrashSelection(item: DriveItem) {
@@ -1212,6 +1614,7 @@ export function App() {
               checked={selectedIds.includes(row.original.id)}
               aria-label={`Select ${row.original.name}`}
               onChange={() => toggleItemSelection(row.original)}
+              onMouseDown={(event) => event.stopPropagation()}
               onClick={(event) => event.stopPropagation()}
               onDoubleClick={(event) => event.stopPropagation()}
             />
@@ -1259,9 +1662,11 @@ export function App() {
         header: "",
         cell: ({ row }) => (
           <span className="row-actions">
-            <MoreHorizontal
-              size={16}
-              onClick={(event: MouseEvent<SVGSVGElement>) => {
+            <button
+              type="button"
+              className="icon-button row-actions-button"
+              aria-label={`Actions for ${row.original.name}`}
+              onClick={(event: MouseEvent<HTMLButtonElement>) => {
                 event.preventDefault();
                 event.stopPropagation();
                 setContextMenu({
@@ -1270,7 +1675,9 @@ export function App() {
                   item: row.original,
                 });
               }}
-            />
+            >
+              <MoreHorizontal size={16} aria-hidden="true" />
+            </button>
           </span>
         ),
       }),
@@ -1284,58 +1691,20 @@ export function App() {
     getCoreRowModel: getCoreRowModel(),
   });
 
-  if (!token || meQuery.isError) {
+  if (bootstrapping || !token || meQuery.isError) {
     return (
-      <main className="auth-shell">
-        <form
-          className="auth-panel"
-          onSubmit={(event) => {
-            event.preventDefault();
-            authMutation.mutate();
-          }}
-        >
-          <div className="brand compact">
-            <div className="brand-mark">
-              <Cloud size={22} />
-            </div>
-            <div>
-              <strong>TeleDrive</strong>
-              <span>Private file manager</span>
-            </div>
-          </div>
-          <h1>{authMode === "register" ? "Create admin account" : "Sign in"}</h1>
-          <label>
-            Email
-            <input
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              autoComplete="email"
-              placeholder="you@example.com"
-            />
-          </label>
-          <label>
-            Password
-            <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              autoComplete={authMode === "register" ? "new-password" : "current-password"}
-              placeholder="Enter a strong password"
-            />
-          </label>
-          {authError && <p className="auth-error">{authError}</p>}
-          <button className="tool-button primary" type="submit">
-            {authMode === "register" ? "Create account" : "Sign in"}
-          </button>
-          <button
-            className="tool-button"
-            type="button"
-            onClick={() => setAuthMode(authMode === "register" ? "login" : "register")}
-          >
-            {authMode === "register" ? "I already have an account" : "Create account"}
-          </button>
-        </form>
-      </main>
+      <AuthScreen
+        bootstrapping={bootstrapping}
+        authMode={authMode}
+        onAuthModeChange={setAuthMode}
+        email={email}
+        onEmailChange={setEmail}
+        password={password}
+        onPasswordChange={setPassword}
+        authError={authError}
+        isSubmitting={authMutation.isPending}
+        onSubmit={() => authMutation.mutate()}
+      />
     );
   }
 
@@ -1408,15 +1777,17 @@ export function App() {
             <Trash2 size={16} />
             Trash Bin
           </button>
-          <button
-            type="button"
-            data-testid="nav-server-files"
-            className={`tree-item ${sidePanel === "server" ? "active" : ""}`}
-            onClick={(event) => handleTreeAction(event, openServerFiles)}
-          >
-            <Server size={16} />
-            Server Files
-          </button>
+          {meQuery.data?.isOperator && (
+            <button
+              type="button"
+              data-testid="nav-server-files"
+              className={`tree-item ${sidePanel === "server" ? "active" : ""}`}
+              onClick={(event) => handleTreeAction(event, openServerFiles)}
+            >
+              <Server size={16} />
+              Server Files
+            </button>
+          )}
           <p className="tree-label">System</p>
           <button
             type="button"
@@ -1545,11 +1916,16 @@ export function App() {
             </button>
             <button
               className="tool-button command-delete danger"
-              disabled={!selectedIds.length || bulkDeleteMutation.isPending}
-              onClick={() => bulkDeleteMutation.mutate(selectedIds)}
+              disabled={!selectedIds.length || isDriveDeleting}
+              title={selectedIds.length ? undefined : "Select items with checkboxes, Ctrl+click, or Shift+click"}
+              onClick={requestBulkDelete}
             >
-              <Trash2 size={16} />
-              {selectedIds.length > 1 ? `Delete (${selectedIds.length})` : "Delete"}
+              <Trash2 size={16} className={isDriveDeleting ? "spinning" : ""} />
+              {isDriveDeleting
+                ? "Deleting..."
+                : selectedIds.length > 1
+                  ? `Delete (${selectedIds.length})`
+                  : "Delete"}
             </button>
             <button
               className="tool-button command-download"
@@ -1565,7 +1941,7 @@ export function App() {
             </button>
             <button
               className="tool-button command-server"
-              disabled={!selectedFiles.length || copyDriveFilesToServerMutation.isPending}
+              disabled={!meQuery.data?.isOperator || !selectedFiles.length || copyDriveFilesToServerMutation.isPending}
               onClick={() => copyDriveFilesToServerMutation.mutate(selectedFiles)}
             >
               <Server size={16} />
@@ -1613,27 +1989,33 @@ export function App() {
               {showDetails ? "Hide details" : "Show details"}
             </button>
             <span className="toolbar-spacer" />
-            <button className="icon-button command-refresh" onClick={() => void refreshFiles()} title="Refresh">
-              <RefreshCw size={16} />
+            <button
+              className="icon-button command-refresh"
+              onClick={() => void refreshFiles()}
+              title="Refresh"
+              aria-label="Refresh file list"
+            >
+              <RefreshCw size={16} aria-hidden="true" />
             </button>
           </div>
         </header>
 
         <section className="address-row">
           <div className="history-buttons">
-            <button className="icon-button" disabled={!canGoBack} onClick={goBack} title="Back">
-              <ArrowLeft size={16} />
+            <button className="icon-button" disabled={!canGoBack} onClick={goBack} title="Back" aria-label="Go back">
+              <ArrowLeft size={16} aria-hidden="true" />
             </button>
             <button
               className="icon-button"
               disabled={!canGoForward}
               onClick={goForward}
               title="Forward"
+              aria-label="Go forward"
             >
-              <ArrowRight size={16} />
+              <ArrowRight size={16} aria-hidden="true" />
             </button>
-            <button className="icon-button" disabled={!canGoUp} onClick={goUp} title="Up">
-              <ChevronDown className="up-icon" size={16} />
+            <button className="icon-button" disabled={!canGoUp} onClick={goUp} title="Up" aria-label="Go up one folder">
+              <ChevronDown className="up-icon" size={16} aria-hidden="true" />
             </button>
           </div>
           <div className="address-bar" aria-label="Address">
@@ -1684,6 +2066,8 @@ export function App() {
               </a>
             )}
             {actionErrorMessage && <span className="status-error">{actionErrorMessage}</span>}
+            {renderDeleteFeedback()}
+            {uploadProgress !== null && <span className="status-detail">Uploading {uploadProgress}%</span>}
           </div>
           <div className="metrics">
             <span>{items.length} items</span>
@@ -1963,6 +2347,19 @@ export function App() {
                   </label>
                   <button
                     className="tool-button command-edit"
+                    disabled={!serverSelectedItem || serverSelectedItem.kind !== "file" || !isEditableTextFile(serverSelectedItem) || serverSelectedPaths.length !== 1}
+                    onClick={() => serverSelectedItem && void openTextEditor({
+                      source: "server",
+                      path: serverSelectedItem.path,
+                      name: serverSelectedItem.name,
+                      size: serverSelectedItem.size,
+                    })}
+                  >
+                    <Edit3 size={16} />
+                    Edit text
+                  </button>
+                  <button
+                    className="tool-button command-edit"
                     disabled={!serverSelectedItem || serverSelectedPaths.length !== 1}
                     onClick={() => serverSelectedItem && startServerRename(serverSelectedItem)}
                   >
@@ -2156,7 +2553,10 @@ export function App() {
                   <Trash2 size={22} />
                   <div>
                     <h2>Trash Bin</h2>
-                    <p>Restore deleted items or remove them permanently.</p>
+                    <p>
+                      Restore deleted items or remove them permanently. Permanent delete also
+                      removes synced files from your Telegram storage channel.
+                    </p>
                   </div>
                 </div>
                 <div className="trash-actions">
@@ -2205,9 +2605,7 @@ export function App() {
                   </button>
                   <button
                     className="tool-button danger"
-                    disabled={
-                      !trashSelectedIds.length || bulkPermanentDeleteMutation.isPending
-                    }
+                    disabled={!trashSelectedIds.length || isTrashDeleting}
                     onClick={() => {
                       if (
                         window.confirm(
@@ -2218,8 +2616,8 @@ export function App() {
                       }
                     }}
                   >
-                    <Trash2 size={16} />
-                    Delete permanently
+                    <Trash2 size={16} className={bulkPermanentDeleteMutation.isPending ? "spinning" : ""} />
+                    {bulkPermanentDeleteMutation.isPending ? "Deleting..." : "Delete permanently"}
                   </button>
                   <button
                     className="tool-button danger trash-empty"
@@ -2230,11 +2628,23 @@ export function App() {
                       }
                     }}
                   >
-                    Empty trash
+                    <Trash2 size={16} className={emptyTrashMutation.isPending ? "spinning" : ""} />
+                    {emptyTrashMutation.isPending ? "Emptying..." : "Empty trash"}
                   </button>
                 </div>
+                {renderDeleteFeedback()}
+                <DeletionJobBanners
+                  failedJobs={failedDeletionJobs}
+                  processingJobs={processingDeletionJobs}
+                  queuedJobs={queuedDeletionJobs}
+                  onRetry={() => retryDeletionJobsMutation.mutate()}
+                  isRetrying={retryDeletionJobsMutation.isPending}
+                />
                 {trashItems.length ? (
-                  <div className="trash-list" aria-busy={trashQuery.isLoading}>
+                  <div
+                    className="trash-list"
+                    aria-busy={trashQuery.isLoading || emptyTrashMutation.isPending}
+                  >
                     {trashItems.map((item) => (
                       <div
                         className={`trash-row ${trashSelectedIds.includes(item.id) ? "selected" : ""}`}
@@ -2413,6 +2823,70 @@ export function App() {
                     )}
                   </section>
                 )}
+                <section className="account-form">
+                  <h3>Storage recovery</h3>
+                  <p>
+                    Save an encrypted drive manifest to your private Telegram channel, then restore it after a database loss.
+                    Keep the original ENCRYPTION_KEY: without it, existing manifests cannot be read.
+                    Only the latest manifest is kept; older copies are removed automatically.
+                  </p>
+                  <div className="stacked-actions">
+                    <button className="tool-button" type="button" disabled={createManifestMutation.isPending} onClick={() => createManifestMutation.mutate()}>
+                      {createManifestMutation.isPending ? "Saving manifest…" : "Save recovery manifest"}
+                    </button>
+                    <button className="tool-button" type="button" disabled={restoreManifestMutation.isPending} onClick={() => restoreManifestMutation.mutate()}>
+                      {restoreManifestMutation.isPending ? "Restoring…" : "Restore latest manifest"}
+                    </button>
+                    <button className="tool-button" type="button" disabled={cleanupManifestsMutation.isPending} onClick={() => cleanupManifestsMutation.mutate()}>
+                      {cleanupManifestsMutation.isPending ? "Cleaning…" : "Clean up old manifests"}
+                    </button>
+                    <button
+                      className="tool-button danger"
+                      type="button"
+                      disabled={purgeChannelMutation.isPending}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            "Delete every file in your Telegram storage channel? The latest recovery manifest is kept if available.",
+                          )
+                        ) {
+                          purgeChannelMutation.mutate();
+                        }
+                      }}
+                    >
+                      {purgeChannelMutation.isPending ? "Cleaning channel…" : "Clean up Telegram channel"}
+                    </button>
+                    <button className="tool-button" type="button" disabled={importTelegramRecoveryMutation.isPending} onClick={() => importTelegramRecoveryMutation.mutate()}>
+                      Import Telegram files without manifest
+                    </button>
+                  </div>
+                  {recoveryMessage && <p className="account-message">{recoveryMessage}</p>}
+                </section>
+                {deletionJobsQuery.data?.length ? (
+                  <section className="account-form">
+                    <h3>Telegram cleanup</h3>
+                    <p>
+                      Files removed from TeleDrive are deleted from your Telegram storage channel in
+                      one batch connection. Failed cleanups stay listed until retried successfully.
+                    </p>
+                    <button
+                      className="tool-button"
+                      type="button"
+                      disabled={retryDeletionJobsMutation.isPending || !deletionJobsQuery.data.length}
+                      onClick={() => retryDeletionJobsMutation.mutate()}
+                    >
+                      {retryDeletionJobsMutation.isPending ? "Retrying…" : "Retry Telegram cleanup"}
+                    </button>
+                    <ul className="deletion-job-list">
+                      {deletionJobsQuery.data.map((job) => (
+                        <li key={job.id}>
+                          <strong>{job.status}</strong> · attempt {job.attempts}
+                          {job.lastError ? ` · ${job.lastError}` : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                ) : null}
               </>
             )}
             {sidePanel === "setup" && (
@@ -2699,7 +3173,7 @@ export function App() {
         ) : (
         <div className={`content-grid ${showDetails ? "" : "details-hidden"} ${viewMode === "compact" ? "compact-view" : ""}`}>
           <section
-            className={`file-panel ${isDragging ? "dragging" : ""}`}
+            className={`file-panel ${isDragging ? "dragging" : ""} ${isDriveDeleting ? "deleting" : ""}`}
             onDragOver={(event) => {
               event.preventDefault();
               setIsDragging(true);
@@ -2717,7 +3191,7 @@ export function App() {
               </div>
             ))}
 
-            <div className="file-list" aria-busy={filesQuery.isLoading}>
+            <div className="file-list" aria-busy={filesQuery.isLoading || isDriveDeleting}>
               {table.getRowModel().rows.map((row) => (
                 <div
                   key={row.id}
@@ -2725,7 +3199,7 @@ export function App() {
                   role="button"
                   tabIndex={0}
                   draggable={renamingId !== row.original.id}
-                  onClick={() => selectOnly(row.original)}
+                  onClick={(event) => handleDriveItemClick(row.original, event)}
                   onDoubleClick={() => openFolder(row.original)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && renamingId !== row.original.id) {
@@ -2820,10 +3294,22 @@ export function App() {
                   </div>
                 </dl>
                 {selectedItem.kind === "file" ? (
-                  <button className="button wide" onClick={() => openDownload(selectedItem)}>
-                    Download file
-                    <Download size={17} />
-                  </button>
+                  <div className="stacked-actions">
+                    <button className="button wide" disabled={!isEditableTextFile(selectedItem)} onClick={() => void openTextEditor({
+                      source: "drive",
+                      id: selectedItem.id,
+                      name: selectedItem.name,
+                      size: selectedItem.size,
+                      mimeType: selectedItem.mimeType,
+                    })}>
+                      Edit text
+                      <Edit3 size={17} />
+                    </button>
+                    <button className="button wide" onClick={() => openDownload(selectedItem)}>
+                      Download file
+                      <Download size={17} />
+                    </button>
+                  </div>
                 ) : (
                   <button className="button wide" onClick={() => openFolder(selectedItem)}>
                     Open folder
@@ -2861,6 +3347,18 @@ export function App() {
             </button>
           )}
           {contextMenu.item.kind === "file" && (
+            <button disabled={!isEditableTextFile(contextMenu.item)} onClick={() => void openTextEditor({
+              source: "drive",
+              id: contextMenu.item.id,
+              name: contextMenu.item.name,
+              size: contextMenu.item.size,
+              mimeType: contextMenu.item.mimeType,
+            })}>
+              <Edit3 size={15} />
+              Edit text
+            </button>
+          )}
+          {contextMenu.item.kind === "file" && (
             <button onClick={() => syncMutation.mutate(contextMenu.item.id)}>
               <CloudUpload size={15} />
               Sync to Telegram
@@ -2872,13 +3370,38 @@ export function App() {
           </button>
           <button
             className="danger"
+            disabled={isDriveDeleting}
             onClick={() => deleteFileMutation.mutate(contextMenu.item.id)}
           >
-            <Trash2 size={15} />
-            Delete
+            <Trash2 size={15} className={deleteFileMutation.isPending ? "spinning" : ""} />
+            {deleteFileMutation.isPending ? "Deleting..." : "Delete"}
           </button>
         </div>
       )}
+      {editorTarget && (
+        <TextEditorDialog
+          document={editorDocument}
+          fileName={editorTarget.name}
+          loading={editorLoading}
+          saving={saveEditorMutation.isPending}
+          error={editorError}
+          onClose={() => {
+            editorRequestRef.current += 1;
+            setEditorDocument(null);
+            setEditorTarget(null);
+            setEditorError("");
+            setEditorConflict(false);
+            setEditorLoading(false);
+          }}
+          onReload={editorConflict ? () => void openTextEditor(editorTarget) : undefined}
+          onSave={(payload) => saveEditorMutation.mutate({
+            target: editorTarget,
+            payload,
+            revision: editorDocument?.revision,
+          })}
+        />
+      )}
+      <DevHealthBadge />
     </main>
   );
 }

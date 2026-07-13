@@ -31,6 +31,8 @@ Vite + React + TanStack Web UI
 
 The web app should never call Telegram directly. Every client, including future mobile or CLI clients, should use the same HTTP API.
 
+Browser clients authenticate with HttpOnly session cookies plus a CSRF token on mutating requests. API tokens in response bodies are compatibility fields; the web UI does not store JWTs in `localStorage`.
+
 All file APIs require an authenticated user. Drive metadata is scoped by `user_id`, and a user's Telegram API credentials and session string are encrypted before storage.
 
 ## Storage Adapter Contract
@@ -41,9 +43,21 @@ Storage adapters are responsible for:
 - Storing file bytes and returning a remote id.
 - Deleting provider objects when deletion policy allows it.
 
-The current upload phase stages bytes locally under `STORAGE_TEMP_PATH` and stores a `local://...` remote id. Telegram upload will replace that staging id with a Telegram document/message id in a later worker phase.
+The current upload phase stages bytes locally under `STORAGE_TEMP_PATH` and stores a `local://...` remote id. Telegram upload replaces that staging id with a Telegram document/message id in a later worker phase; the staging object is removed only after that mapping commits.
 
 The sync phase exposes `POST /api/files/:id/sync`. If Telegram credentials are configured, the MTProto adapter creates or reuses the private storage channel and uploads the file as a Telegram document. If credentials are missing, the file remains local and its status becomes `waiting_for_telegram_session`.
+
+Text edits are content revisions: TeleDrive stages the encoded text, uploads the replacement Telegram document, then switches the metadata mapping. The prior document is persisted as a deletion job and is retried by the worker using the owning user's encrypted Telegram credentials.
+
+After completed drive mutations, TeleDrive queues a worker task to upload an encrypted `.teledrive-manifest.v1.enc` metadata snapshot to the same private channel. It retains the newest snapshot and queues obsolete documents for durable deletion. The manifest is Fernet-encrypted with a per-user key derived from `ENCRYPTION_KEY`; restoring it requires that original application key. When no valid manifest exists, the recovery import can only recreate a flat `Recovered from Telegram` folder because Telegram documents do not contain the original directory tree.
+
+## Telegram Deletion Jobs
+
+Permanent delete, empty trash, text edits, and manifest rotation enqueue durable `deletion_jobs` rows keyed by `(user_id, remote_id)`. The worker deletes Telegram documents in batches inside a single MTProto session. Failed jobs use capped exponential backoff. Stale `processing` jobs are reclaimed after a worker lease timeout.
+
+Celery Beat runs `teledrive.retry_deletions` every 60 seconds in development and production worker deployments. Trash UI polls deletion jobs only while Trash or Account is open. Opening Trash may pass `?reconcile=true` so jobs whose Telegram documents are already gone are removed from the database without another delete attempt.
+
+Recovery tools can purge orphaned channel documents directly. Those flows do not automatically clear deletion jobs, so reconcile keeps UI state aligned with the channel.
 
 They are not responsible for:
 
@@ -60,7 +74,7 @@ The Telegram adapter is based on a user's Telegram account session, not a bot to
 - `TELEGRAM_API_HASH`
 - `TELEGRAM_SESSION`
 
-Server-level `.env` values for those keys are optional for the in-app setup flow. The production Docker deployment requires:
+Per-user encrypted credentials take precedence. Server-level `.env` values are an explicit operator fallback for workers and status checks when a user has not configured credentials. The production Docker deployment requires:
 
 - `FRONTEND_URL`
 - `API_URL`
@@ -86,11 +100,13 @@ The metadata repository is database-backed with SQLAlchemy async. The intended p
 - Drive items
 - Folder tree
 - Provider object mappings
-- Upload jobs
+- Upload and Telegram deletion jobs
+- Encrypted manifest snapshots
 - Audit events
 
 ## Roadmap
 
-1. Automatic user-scoped sync scheduling after upload. Done in the API request path via FastAPI background tasks; Celery worker scaffolding keeps the same user-aware sync contract.
-2. Add download streaming from Telegram when bytes are no longer local.
-3. Add provider repair jobs.
+1. Automatic user-scoped sync scheduling after upload. Done in the API request path via FastAPI background tasks; Celery workers handle deletion retries and manifest work.
+2. Local development stack health endpoint at `GET /api/dev/stack-status` (debug only).
+3. Add download streaming from Telegram when bytes are no longer local.
+4. Add provider repair jobs.

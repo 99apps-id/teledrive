@@ -1,6 +1,7 @@
 from base64 import urlsafe_b64encode
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+import hmac
 from uuid import uuid4
 
 import bcrypt
@@ -52,3 +53,20 @@ def decrypt_secret(value: str | None) -> str:
     if not value:
         return ""
     return _fernet().decrypt(value.encode("utf-8")).decode("utf-8")
+
+
+def _user_fernet(user_id: str) -> Fernet:
+    key = hmac.new(
+        settings.encryption_key.encode("utf-8"),
+        f"teledrive-manifest:{user_id}".encode("utf-8"),
+        sha256,
+    ).digest()
+    return Fernet(urlsafe_b64encode(key))
+
+
+def encrypt_for_user(user_id: str, value: str) -> str:
+    return _user_fernet(user_id).encrypt(value.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_for_user(user_id: str, value: str) -> str:
+    return _user_fernet(user_id).decrypt(value.encode("utf-8")).decode("utf-8")

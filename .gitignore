@@ -22,6 +22,9 @@ certificates
 *.p12
 *.pfx
 *.session
+celerybeat-schedule*
+audit-storage
+apps/api/storage
 .venv
 venv
 .idea

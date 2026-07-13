@@ -35,6 +35,8 @@ class FileSyncService:
                 name=item.name,
                 mime_type=item.mime_type,
             )
-            return await self.repository.mark_synced(item_id, remote_id)
+            synced = await self.repository.mark_synced(item_id, remote_id)
+            await self.local_storage.delete(item.storage.remote_id)
+            return synced
         except Exception as error:
             return await self.repository.mark_sync_failed(item_id, str(error))

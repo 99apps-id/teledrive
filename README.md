@@ -15,8 +15,11 @@ TeleDrive is an alpha release for a single trusted operator or a small, trusted 
 
 - Local user login and registration.
 - Web file manager with folders, upload, download, rename, delete, trash bin, multi-select, and `.zip` download.
+- In-browser text editor for supported text and code files.
 - Guided Telegram setup inside the app.
+- Durable Telegram deletion queue with background cleanup, stale-job reclaim, and channel reconcile.
 - Encrypted storage for sensitive user credentials.
+- Cookie-based browser sessions with CSRF protection on mutating API requests.
 - Server Files for browsing and managing VPS/server folders.
 - Hybrid server access modes:
   - local app to VPS through SSH/SFTP
@@ -53,6 +56,7 @@ Prerequisites:
 - Git for Windows
 - Node.js 20 or newer
 - Python 3.11 or newer
+- Docker Desktop (recommended for local Redis used by the background worker)
 
 Install dependencies:
 
@@ -82,16 +86,29 @@ JWT_SECRET=replace-with-a-long-random-secret
 ENCRYPTION_KEY=replace-with-a-different-long-random-secret
 ```
 
-Start TeleDrive:
+Start TeleDrive with the API, web UI, Celery worker, and Beat scheduler:
 
 ```powershell
+npm run dev:full
+```
+
+`dev:full` starts Redis through Docker Compose, then runs the full local stack. Use this when you need permanent Telegram deletes, background sync retries, and recovery manifest jobs.
+
+If Redis is already running on `localhost:6381`, `npm run dev` is enough. It starts the API, web UI, worker, and Beat together.
+
+If a previous dev session left ports stuck:
+
+```powershell
+npm run dev:clean
 npm run dev
 ```
 
 Open:
 
 - Web: `http://localhost:5173`
-- API: `http://localhost:8000`
+- API: `http://localhost:8001`
+
+If port `8000` is already used on your machine (for example by another local tool), TeleDrive development defaults to `8001`.
 
 ### macOS
 
@@ -100,6 +117,7 @@ Prerequisites:
 - Git
 - Node.js 20 or newer
 - Python 3.11 or newer
+- Docker Desktop (recommended for local Redis used by the background worker)
 
 With Homebrew:
 
@@ -128,11 +146,13 @@ Generate strong local secrets and put different values in `.env`:
 python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Start TeleDrive:
+Start TeleDrive with the API, web UI, and background worker:
 
 ```bash
-npm run dev
+npm run dev:full
 ```
+
+If Redis is already running, `npm run dev` is enough.
 
 Open `http://localhost:5173`.
 
@@ -143,6 +163,7 @@ Prerequisites:
 - Git
 - Node.js 20 or newer
 - Python 3.11 or newer
+- Docker (recommended for local Redis used by the background worker)
 
 Example for Ubuntu/Debian:
 
@@ -167,22 +188,26 @@ Generate strong local secrets and put different values in `.env`:
 python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Start TeleDrive:
+Start TeleDrive with the API, web UI, and background worker:
 
 ```bash
-npm run dev
+npm run dev:full
 ```
+
+If Redis is already running, `npm run dev` is enough.
 
 Open `http://localhost:5173`.
 
 ## First Login and Setup
 
-1. Open the web app.
-2. Create a local TeleDrive account.
+1. Open the web app at `http://localhost:5173`.
+2. Sign in, or create the first local TeleDrive account if none exists yet.
 3. Open **Telegram setup**.
 4. Save your Telegram API ID and API Hash.
 5. Follow the in-app login wizard to create a Telegram session.
-6. Open **Server Files** if you want to connect a local server folder or VPS over SFTP.
+6. If you are the designated operator, open **Server Files** to connect a local server folder or VPS over SFTP. This surface is intentionally unavailable to non-operator accounts.
+
+The first registered account becomes the operator. Production deployments should disable registration after that account is created.
 
 ## Local Development
 
@@ -212,7 +237,25 @@ On Windows PowerShell:
 Copy-Item .env.example .env
 ```
 
-Start the app:
+Generate distinct values for `JWT_SECRET` and `ENCRYPTION_KEY` in `.env`. Keep `DATABASE_URL` pointed at `teledrive.db` for normal local work; do not point it at test databases.
+
+### Dev scripts
+
+| Script | Purpose |
+| --- | --- |
+| `npm run dev:full` | Start Redis (Docker), API, web UI, worker, and Beat |
+| `npm run dev` | Start API, web UI, worker, and Beat when Redis is already running |
+| `npm run dev:clean` | Free stuck dev ports on Windows (`8001`, `5173`–`5175`) |
+| `npm run check` | Run TypeScript typecheck and API pytest suite |
+| `npm run build` | Build web and shared packages |
+
+Start the full local stack:
+
+```bash
+npm run dev:full
+```
+
+If Redis is already running:
 
 ```bash
 npm run dev
@@ -221,7 +264,19 @@ npm run dev
 Defaults:
 
 - Web: `http://localhost:5173`
-- API: `http://localhost:8000`
+- API: `http://localhost:8001`
+- Redis: `localhost:6381` (via Docker Compose)
+
+In development builds, a small **Dev stack** badge in the web UI shows API, Redis, and worker status.
+
+### Local development troubleshooting
+
+- If `npm run dev` fails with `Port 5173 is in use` or `Port 8001 is in use`, run `npm run dev:clean` and start again.
+- On Windows, the worker uses Celery's `solo` pool to avoid `PermissionError: Access is denied` from the default prefork pool.
+- If Vite moves to another port such as `5175`, close the older dev terminal, run `npm run dev:clean`, then run `npm run dev` again so the web UI returns to `5173`.
+- If `dev:full` fails because Docker is not installed or not in `PATH`, start Redis another way on `6381` and use `npm run dev`.
+- If login succeeds but the app immediately returns to the sign-in screen, hard refresh the browser (`Ctrl+Shift+R`) and make sure only one API process is listening on `8001`.
+- If Trash shows Telegram cleanup jobs after the channel is already empty, open Trash once to reconcile job state, or use **Retry Telegram cleanup** from Account settings.
 
 ## Telegram Setup
 
@@ -240,7 +295,7 @@ Telegram API credentials and sessions are stored encrypted per user. Do not comm
 
 ## Server Files / VPS Access
 
-The **Server Files** area is used to access files on a server or VPS.
+The **Server Files** area is used to access files on a server or VPS. It is restricted to the designated operator account; it is not a shared-user feature.
 
 ### Mode 1: Local TeleDrive to VPS via SSH
 
@@ -282,6 +337,16 @@ In the UI:
 
 This mode is safer because TeleDrive does not need to store SSH credentials.
 
+## Text Editor, deletion, and recovery
+
+TeleDrive can edit supported text and code files in the browser from both **TeleDrive Storage** and **Server Files**. The editor preserves line endings and detects common encodings, including UTF-8 (with or without BOM), UTF-16 LE/BE, and Windows-1252. A file must be a supported text type and smaller than `TELEDRIVE_MAX_EDITOR_BYTES` (5 MiB by default); binaries are intentionally rejected.
+
+Saving an edited TeleDrive file creates a new Telegram document before replacing its stored reference. The previous Telegram document is placed in a durable deletion queue and processed by the worker with capped exponential backoff. Celery Beat retries due deletion jobs every 60 seconds in local development. Stale in-progress jobs are reclaimed after a worker crash.
+
+Permanent-delete and empty-trash requests return when cleanup is queued. Trash shows whether cleanup is **queued**, **processing**, or **failed**. Opening Trash reconciles jobs against the Telegram channel so UI state matches files that were already removed manually or by recovery tools. Use **Retry Telegram cleanup** from Trash or Account settings if jobs fail.
+
+TeleDrive also stores encrypted metadata snapshots in the private storage channel. Mutations enqueue snapshot work for the Celery worker, which retains the newest snapshot and queues obsolete manifest documents for deletion. Use the Storage/Recovery panel to preview and restore the latest snapshot after reinstalling or recovering the database. The original `ENCRYPTION_KEY` is required: losing or changing it makes old manifest snapshots unreadable. If no valid snapshot is available, the fallback import scans Telegram documents into a flat `Recovered from Telegram` folder; it cannot reconstruct the original folder hierarchy.
+
 ## Security Notes
 
 Recommended deployment practices:
@@ -303,6 +368,8 @@ Local development uses SQLite by default:
 DATABASE_URL=sqlite+aiosqlite:///./teledrive.db
 ```
 
+The path is relative to `apps/api` when the API starts. Do not commit local database files.
+
 PostgreSQL is recommended for VPS/production deployments.
 
 Run migrations manually from `apps/api`:
@@ -323,7 +390,7 @@ The standalone production deployment is `docker-compose.production.yml`. It buil
 cp .env.example .env
 ```
 
-Required values are `FRONTEND_URL`, `API_URL`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `JWT_SECRET`, `ENCRYPTION_KEY`, and `TELEDRIVE_STORAGE_CHANNEL`. Generate distinct application secrets, for example:
+Required values are `FRONTEND_URL`, `API_URL`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `JWT_SECRET`, `ENCRYPTION_KEY`, `TELEDRIVE_STORAGE_CHANNEL`, and `TRUSTED_PROXY_CIDRS`. Generate distinct application secrets, for example:
 
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(48))"
@@ -337,6 +404,8 @@ docker compose -f docker-compose.production.yml ps
 ```
 
 The production compose file intentionally has no secret fallbacks; Compose stops with an error if a required variable is missing. Never reuse the example values or commit the resulting `.env`.
+
+Redis defaults to the internal `redis:6379/0` service. Set `REDIS_PASSWORD` as the raw password (special characters are URL-encoded by the API before use). Leave `REDIS_URL` empty for this default, or set an explicit, already encoded `REDIS_URL` for an external Redis provider; an explicit URL takes precedence over the component settings.
 
 ### Create the first operator account
 
@@ -353,6 +422,8 @@ Do not leave registration enabled on an internet-accessible deployment.
 ### TLS, reverse proxy, and resources
 
 Put a reverse proxy such as Caddy, nginx, or Traefik in front of `https://drive.example.com`, terminate TLS there, and proxy only to `http://127.0.0.1:8080`. Redirect HTTP to HTTPS, enable automatic certificate renewal, and set `FRONTEND_URL=https://drive.example.com` and `API_URL=https://drive.example.com/api`. Do not publish PostgreSQL, Redis, or the API port.
+
+Set `TRUSTED_PROXY_CIDRS` to the CIDR(s) of the proxy that connects directly to the API. In the bundled deployment that is the Docker network used by the web nginx container, so inspect that stack's `*_internal` Docker network and set its subnet, for example `TRUSTED_PROXY_CIDRS=172.20.0.0/16`. The rate limiter ignores `X-Forwarded-For` unless the immediate TCP peer is in this allowlist; never set it to a public or overly broad network. The public-facing proxy must remove client-supplied `X-Forwarded-For` values and set the verified client address itself before forwarding traffic.
 
 Size the VPS according to upload volume and worker activity. Start with at least 2 CPU cores, 2 GB RAM, and disk capacity for PostgreSQL plus the local staging volume; increase memory and storage before sustained concurrent uploads. Configure host-level disk-space monitoring and container log rotation.
 
@@ -377,7 +448,7 @@ Open **Telegram setup** and complete the API ID, API Hash, phone, OTP, and optio
 
 ### `Port already in use`
 
-Stop the process using port `5173` or `8000`, or run the API/web on another port.
+Run `npm run dev:clean`, then `npm run dev`. Default dev ports are `5173` (web) and `8001` (API).
 
 ### Server Files cannot connect
 
@@ -403,18 +474,44 @@ ENCRYPTION_KEY=replace-with-a-different-long-random-secret
 
 ## Important API Endpoints
 
+Auth and session:
+
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `POST /api/auth/logout`
 - `GET /api/auth/me`
+
+Telegram setup:
+
 - `PUT /api/auth/telegram-credentials`
 - `POST /api/auth/telegram-login/start`
 - `POST /api/auth/telegram-login/verify`
+
+Drive and trash:
+
 - `GET /api/files`
 - `POST /api/files/upload`
 - `GET /api/files/:id/download`
 - `POST /api/files/download-zip`
 - `GET /api/trash`
+- `DELETE /api/trash/:id`
+- `DELETE /api/trash`
+- `POST /api/trash/bulk-permanent`
+- `GET /api/deletion-jobs?reconcile=true`
+- `POST /api/deletion-jobs/retry`
+
+Recovery and channel maintenance:
+
+- `POST /api/recovery/manifest`
+- `POST /api/recovery/manifest/restore`
+- `POST /api/recovery/manifests/cleanup`
+- `POST /api/recovery/channel-cleanup`
+- `POST /api/recovery/import-telegram`
+
+Server Files and status:
+
 - `GET /api/update/status`
+- `GET /api/dev/stack-status` (development only)
 - `GET /api/server-files`
 - `GET /api/server-files/status`
 - `GET /api/server-files/config`

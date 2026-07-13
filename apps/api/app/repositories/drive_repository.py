@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.drive_item import DriveItemModel
@@ -80,6 +80,24 @@ class DriveRepository:
         await self.session.refresh(item)
         return self._to_schema(item)
 
+    async def get_or_create_folder(self, name: str, parent_id: str | None = None) -> DriveItem:
+        existing = await self.session.scalar(
+            select(DriveItemModel)
+            .where(DriveItemModel.user_id == self.user_id)
+            .where(DriveItemModel.kind == "folder")
+            .where(DriveItemModel.name == name)
+            .where(
+                DriveItemModel.parent_id.is_(None)
+                if parent_id is None
+                else DriveItemModel.parent_id == parent_id
+            )
+            .where(DriveItemModel.deleted_at.is_(None))
+            .order_by(DriveItemModel.created_at)
+        )
+        if existing is not None:
+            return self._to_schema(existing)
+        return await self.create_folder(name, parent_id)
+
     async def create_file(
         self,
         name: str,
@@ -102,12 +120,137 @@ class DriveRepository:
             mime_type=mime_type,
             storage_remote_id=remote_id,
             storage_channel_name=self.channel_name,
-            sync_status="local" if remote_id and remote_id.startswith("local://") else "synced",
+            sync_status=(
+                "synced"
+                if remote_id and remote_id.startswith("telegram://")
+                else "local"
+                if remote_id and remote_id.startswith("local://")
+                else "pending_upload"
+            ),
         )
         self.session.add(item)
         await self.session.commit()
         await self.session.refresh(item)
         return self._to_schema(item)
+
+    async def import_telegram_file(
+        self,
+        *,
+        name: str,
+        size: int,
+        mime_type: str | None,
+        remote_id: str,
+        parent_id: str | None = None,
+    ) -> DriveItem:
+        existing = await self.session.scalar(
+            select(DriveItemModel)
+            .where(DriveItemModel.user_id == self.user_id)
+            .where(DriveItemModel.storage_remote_id == remote_id)
+        )
+        if existing is not None:
+            return self._to_schema(existing)
+        return await self.create_file(name, parent_id, size, mime_type, remote_id)
+
+    async def manifest_items(self) -> list[dict[str, object]]:
+        result = await self.session.scalars(
+            select(DriveItemModel)
+            .where(DriveItemModel.user_id == self.user_id)
+            .order_by(DriveItemModel.created_at, DriveItemModel.id)
+        )
+        return [
+            {
+                "id": item.id,
+                "kind": item.kind,
+                "name": item.name,
+                "parent_id": item.parent_id,
+                "size": item.size,
+                "mime_type": item.mime_type,
+                "storage_remote_id": item.storage_remote_id,
+                "storage_channel_name": item.storage_channel_name,
+                "sync_status": item.sync_status,
+                "sync_error": item.sync_error,
+                "deleted_at": item.deleted_at.isoformat() if item.deleted_at else None,
+                "created_at": item.created_at.isoformat(),
+                "updated_at": item.updated_at.isoformat(),
+            }
+            for item in result.all()
+        ]
+
+    async def restore_manifest_items(self, items: list[dict[str, object]]) -> int:
+        restored = 0
+        for raw in items:
+            item_id = raw.get("id")
+            kind = raw.get("kind")
+            name = raw.get("name")
+            if not isinstance(item_id, str) or kind not in {"file", "folder"} or not isinstance(name, str):
+                continue
+            current = await self.session.get(DriveItemModel, item_id)
+            if current is not None:
+                if current.user_id != self.user_id:
+                    continue
+                continue
+            parent_id = raw.get("parent_id")
+            remote_id = raw.get("storage_remote_id")
+            channel = raw.get("storage_channel_name")
+            item = DriveItemModel(
+                id=item_id,
+                user_id=self.user_id,
+                kind=kind,
+                name=name[:512],
+                parent_id=parent_id if isinstance(parent_id, str) else None,
+                size=raw.get("size") if isinstance(raw.get("size"), int) else 0,
+                mime_type=raw.get("mime_type") if isinstance(raw.get("mime_type"), str) else None,
+                storage_remote_id=remote_id if isinstance(remote_id, str) else None,
+                storage_channel_name=channel if isinstance(channel, str) else self.channel_name,
+                sync_status=raw.get("sync_status") if isinstance(raw.get("sync_status"), str) else "synced",
+                sync_error=raw.get("sync_error") if isinstance(raw.get("sync_error"), str) else None,
+            )
+            self.session.add(item)
+            restored += 1
+        await self.session.commit()
+        return restored
+
+    async def _load_user_item_maps(
+        self,
+    ) -> tuple[dict[str, DriveItemModel], dict[str | None, list[DriveItemModel]]]:
+        result = await self.session.scalars(
+            select(DriveItemModel).where(DriveItemModel.user_id == self.user_id)
+        )
+        items = result.all()
+        by_id = {item.id: item for item in items}
+        by_parent: dict[str | None, list[DriveItemModel]] = {}
+        for item in items:
+            by_parent.setdefault(item.parent_id, []).append(item)
+        return by_id, by_parent
+
+    def _collect_subtree(
+        self,
+        root_id: str,
+        by_id: dict[str, DriveItemModel],
+        by_parent: dict[str | None, list[DriveItemModel]],
+        seen: set[str],
+    ) -> list[DriveItemModel]:
+        if root_id in seen or root_id not in by_id:
+            return []
+        seen.add(root_id)
+        collected: list[DriveItemModel] = []
+        for child in by_parent.get(root_id, []):
+            collected.extend(self._collect_subtree(child.id, by_id, by_parent, seen))
+        collected.append(by_id[root_id])
+        return collected
+
+    async def _delete_collected_models(
+        self,
+        models: list[DriveItemModel],
+        *,
+        commit: bool,
+    ) -> list[DriveItem]:
+        deleted = [self._to_schema(model) for model in models]
+        for model in models:
+            await self.session.delete(model)
+        if commit:
+            await self.session.commit()
+        return deleted
 
     async def move_to_trash(self, item_id: str) -> DriveItem:
         item = await self._get_model(item_id)
@@ -140,53 +283,36 @@ class DriveRepository:
         await self.session.refresh(item)
         return self._to_schema(item)
 
-    async def delete_permanently(self, item_id: str) -> list[DriveItem]:
-        item = await self._get_model(item_id)
-        deleted: list[DriveItem] = []
+    async def delete_permanently(self, item_id: str, *, commit: bool = True) -> list[DriveItem]:
+        await self._get_model(item_id)
+        by_id, by_parent = await self._load_user_item_maps()
+        seen: set[str] = set()
+        models = self._collect_subtree(item_id, by_id, by_parent, seen)
+        return await self._delete_collected_models(models, commit=commit)
 
-        async def delete_tree(node: DriveItemModel) -> None:
-            if node.kind == "folder":
-                children = await self.session.scalars(
-                    select(DriveItemModel)
-                    .where(DriveItemModel.user_id == self.user_id)
-                    .where(DriveItemModel.parent_id == node.id)
-                )
-                for child in children.all():
-                    await delete_tree(child)
-            deleted.append(self._to_schema(node))
-            await self.session.delete(node)
+    async def delete_permanently_many(self, item_ids: list[str], *, commit: bool = True) -> list[DriveItem]:
+        by_id, by_parent = await self._load_user_item_maps()
+        seen: set[str] = set()
+        models: list[DriveItemModel] = []
+        for item_id in item_ids:
+            models.extend(self._collect_subtree(item_id, by_id, by_parent, seen))
+        return await self._delete_collected_models(models, commit=commit)
 
-        await delete_tree(item)
-        await self.session.commit()
-        return deleted
-
-    async def empty_trash(self) -> list[DriveItem]:
+    async def empty_trash(self, *, commit: bool = True) -> list[DriveItem]:
         trashed = await self.session.scalars(
             select(DriveItemModel)
             .where(DriveItemModel.user_id == self.user_id)
             .where(DriveItemModel.deleted_at.is_not(None))
         )
-        deleted: list[DriveItem] = []
+        trashed_roots = [item.id for item in trashed.all()]
+        if not trashed_roots:
+            return []
+        by_id, by_parent = await self._load_user_item_maps()
         seen: set[str] = set()
-
-        async def delete_tree(node: DriveItemModel) -> None:
-            if node.id in seen:
-                return
-            seen.add(node.id)
-            children = await self.session.scalars(
-                select(DriveItemModel)
-                .where(DriveItemModel.user_id == self.user_id)
-                .where(DriveItemModel.parent_id == node.id)
-            )
-            for child in children.all():
-                await delete_tree(child)
-            deleted.append(self._to_schema(node))
-            await self.session.delete(node)
-
-        for item in trashed.all():
-            await delete_tree(item)
-        await self.session.commit()
-        return deleted
+        models: list[DriveItemModel] = []
+        for root_id in trashed_roots:
+            models.extend(self._collect_subtree(root_id, by_id, by_parent, seen))
+        return await self._delete_collected_models(models, commit=commit)
 
     async def update(
         self,
@@ -241,6 +367,44 @@ class DriveRepository:
         await self.session.commit()
         await self.session.refresh(item)
         return self._to_schema(item)
+
+    async def replace_file_content(
+        self,
+        item_id: str,
+        *,
+        remote_id: str,
+        size: int,
+        sync_status: str,
+        sync_error: str | None = None,
+        expected_revision: datetime | None = None,
+    ) -> DriveItem:
+        current = await self._get_model(item_id)
+        if current.kind != "file":
+            raise HTTPException(status_code=400, detail="Only files have editable content")
+        if expected_revision is None:
+            raise HTTPException(status_code=428, detail="A file revision is required to save edits")
+        updated_at = datetime.now(timezone.utc)
+        result = await self.session.execute(
+            update(DriveItemModel)
+            .where(DriveItemModel.id == item_id)
+            .where(DriveItemModel.user_id == self.user_id)
+            .where(DriveItemModel.kind == "file")
+            .where(DriveItemModel.updated_at == expected_revision)
+            .values(
+                storage_remote_id=remote_id,
+                size=size,
+                sync_status=sync_status,
+                sync_error=sync_error,
+                updated_at=updated_at,
+            )
+        )
+        if result.rowcount != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="This file changed since it was opened. Reload it before saving.",
+            )
+        await self.session.commit()
+        return await self.get(item_id)
 
     async def mark_sync_failed(self, item_id: str, message: str) -> DriveItem:
         item = await self._get_model(item_id)

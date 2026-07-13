@@ -26,7 +26,9 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     from app.models.app_setting import AppSettingModel
+    from app.models.deletion_job import DeletionJobModel
     from app.models.drive_item import DriveItemModel
+    from app.models.manifest_snapshot import ManifestSnapshotModel
     from app.models.user import UserModel
 
     if not settings.debug:

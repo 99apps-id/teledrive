@@ -1,8 +1,9 @@
+import asyncio
 import re
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app import __version__
@@ -37,6 +38,43 @@ def _is_newer_version(latest: str, current: str) -> bool:
     latest_padded = latest_parts + (0,) * (length - len(latest_parts))
     current_padded = current_parts + (0,) * (length - len(current_parts))
     return latest_padded > current_padded
+
+
+class DevStackStatus(BaseModel):
+    api: bool = True
+    redis: bool = False
+    worker: bool = False
+
+
+def _ping_redis(redis_url: str) -> bool:
+    try:
+        from redis import Redis
+
+        return bool(Redis.from_url(redis_url).ping())
+    except Exception:
+        return False
+
+
+def _ping_celery_worker() -> bool:
+    try:
+        from app.worker.tasks import celery_app
+
+        inspect = celery_app.control.inspect(timeout=0.5)
+        return bool(inspect.ping())
+    except Exception:
+        return False
+
+
+@router.get("/dev/stack-status", response_model=dict[str, DevStackStatus])
+async def dev_stack_status():
+    if not settings.debug:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    redis_ok, worker_ok = await asyncio.gather(
+        asyncio.to_thread(_ping_redis, settings.redis_url),
+        asyncio.to_thread(_ping_celery_worker),
+    )
+    return {"data": DevStackStatus(api=True, redis=redis_ok, worker=worker_ok)}
 
 
 @router.get("/update/status", response_model=dict[str, UpdateStatus])

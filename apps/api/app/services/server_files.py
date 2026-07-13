@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import posixpath
 import shutil
 import stat
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Iterator
+from io import BytesIO
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile
 
 from app.core.config import settings
 from app.core.security import decrypt_secret
 from app.models.user import UserModel
+from app.services.local_file_storage import LocalFileStorage
 from app.schemas.server_files import (
     ServerFileItem,
     ServerFilesConfigRequest,
@@ -125,6 +131,18 @@ class LocalServerFiles:
         target.write_bytes(content)
         return self._item_for(target)
 
+    async def overwrite_bytes(self, path: str, content: bytes) -> ServerFileItem:
+        target = self._resolve(path)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Server file not found")
+        temporary = target.with_name(f".{target.name}.teledrive-{uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(content)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return self._item_for(target)
+
     async def write_path(self, path: str, source: Path, name: str) -> ServerFileItem:
         folder = self._resolve(path)
         if not folder.is_dir():
@@ -229,22 +247,47 @@ class SftpServerFiles:
 
     async def upload(self, path: str, upload: UploadFile) -> ServerFileItem:
         name = _clean_name(upload.filename or "upload.bin")
-        content = await upload.read(settings.teledrive_max_upload_bytes + 1)
-        if len(content) > settings.teledrive_max_upload_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Upload exceeds the {settings.teledrive_max_upload_bytes} byte limit",
-            )
-        return await asyncio.to_thread(self._upload_sync, path, name, content)
+        return await asyncio.to_thread(self._upload_file_sync, path, name, upload.file)
 
     async def write_bytes(self, path: str, name: str, content: bytes) -> ServerFileItem:
         return await asyncio.to_thread(self._upload_sync, path, name, content, True)
+
+    async def write_path(self, path: str, source: Path, name: str) -> ServerFileItem:
+        with source.open("rb") as input_file:
+            return await asyncio.to_thread(
+                self._upload_file_sync, path, name, input_file, True
+            )
+
+    async def overwrite_bytes(self, path: str, content: bytes) -> ServerFileItem:
+        return await asyncio.to_thread(self._overwrite_sync, path, content)
 
     async def read_bytes(self, path: str) -> tuple[str, bytes]:
         return await self.download_bytes(path)
 
     async def download_bytes(self, path: str) -> tuple[str, bytes]:
         return await asyncio.to_thread(self._download_sync, path)
+
+    def download_stream(self, path: str) -> tuple[str, Iterator[bytes]]:
+        remote = self._remote_path(path)
+        return posixpath.basename(remote), self._stream_download_sync(remote)
+
+    async def download_to_local_storage(
+        self,
+        path: str,
+        local_storage: LocalFileStorage,
+    ) -> tuple[str, str, int]:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="server-import-",
+            dir=local_storage.root,
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            filename = await asyncio.to_thread(self._download_to_path_sync, path, temporary)
+            remote_id, size = await local_storage.save_path(temporary)
+            return filename, remote_id, size
+        finally:
+            temporary.unlink(missing_ok=True)
 
     async def update(
         self,
@@ -340,6 +383,15 @@ class SftpServerFiles:
         content: bytes,
         dedupe: bool = False,
     ) -> ServerFileItem:
+        return self._upload_file_sync(path, name, BytesIO(content), dedupe)
+
+    def _upload_file_sync(
+        self,
+        path: str,
+        name: str,
+        source,
+        dedupe: bool = False,
+    ) -> ServerFileItem:
         client, sftp = self._connect()
         try:
             target_name = _clean_name(name)
@@ -355,8 +407,23 @@ class SftpServerFiles:
 
                 target_name = _dedupe_name(target_name, exists)
             remote = self._remote_path(_child_path(path, target_name))
-            with sftp.open(remote, "wb") as output:
-                output.write(content)
+            size = 0
+            try:
+                with sftp.open(remote, "wb") as output:
+                    while chunk := source.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > settings.teledrive_max_upload_bytes:
+                            raise HTTPException(
+                                status_code=413,
+                                detail=f"Upload exceeds the {settings.teledrive_max_upload_bytes} byte limit",
+                            )
+                        output.write(chunk)
+            except Exception:
+                try:
+                    sftp.remove(remote)
+                except OSError:
+                    pass
+                raise
             return self._item_for(sftp, remote)
         finally:
             sftp.close()
@@ -371,6 +438,67 @@ class SftpServerFiles:
                 raise HTTPException(status_code=400, detail="Cannot download a folder")
             with sftp.open(remote, "rb") as source:
                 return posixpath.basename(remote), source.read()
+        finally:
+            sftp.close()
+            client.close()
+
+    def _stream_download_sync(self, remote: str) -> Iterator[bytes]:
+        client, sftp = self._connect()
+        try:
+            attrs = sftp.stat(remote)
+            if stat.S_ISDIR(attrs.st_mode or 0):
+                raise HTTPException(status_code=400, detail="Cannot download a folder")
+            with sftp.open(remote, "rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    yield chunk
+        finally:
+            sftp.close()
+            client.close()
+
+    def _download_to_path_sync(self, path: str, destination: Path) -> str:
+        client, sftp = self._connect()
+        try:
+            remote = self._remote_path(path)
+            attrs = sftp.stat(remote)
+            if stat.S_ISDIR(attrs.st_mode or 0):
+                raise HTTPException(status_code=400, detail="Cannot import a folder")
+            size = 0
+            try:
+                with sftp.open(remote, "rb") as source, destination.open("wb") as output:
+                    while chunk := source.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > settings.teledrive_max_upload_bytes:
+                            raise HTTPException(
+                                status_code=413,
+                                detail=f"Content exceeds the {settings.teledrive_max_upload_bytes} byte limit",
+                            )
+                        output.write(chunk)
+            except Exception:
+                destination.unlink(missing_ok=True)
+                raise
+            return posixpath.basename(remote)
+        finally:
+            sftp.close()
+            client.close()
+
+    def _overwrite_sync(self, path: str, content: bytes) -> ServerFileItem:
+        client, sftp = self._connect()
+        try:
+            remote = self._remote_path(path)
+            attrs = sftp.stat(remote)
+            if stat.S_ISDIR(attrs.st_mode or 0):
+                raise HTTPException(status_code=400, detail="Cannot save text over a folder")
+            temporary = f"{remote}.teledrive-{uuid4().hex}.tmp"
+            try:
+                with sftp.open(temporary, "wb") as output:
+                    output.write(content)
+                sftp.rename(temporary, remote)
+            finally:
+                try:
+                    sftp.remove(temporary)
+                except OSError:
+                    pass
+            return self._item_for(sftp, remote)
         finally:
             sftp.close()
             client.close()

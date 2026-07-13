@@ -1,12 +1,15 @@
+import asyncio
 import os
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.core.config import settings
+from app.services.local_file_storage import LocalFileStorage
 
 
 def register(client: TestClient, email: str) -> dict[str, str]:
@@ -138,6 +141,7 @@ def test_local_server_files_reject_path_traversal(client: TestClient) -> None:
 def test_local_server_files_reject_symlink_escape(client: TestClient) -> None:
     user = register(client, "symlink@example.com")
     root = Path(os.environ["TELEDRIVE_SERVER_FILES_ROOT"])
+    root.mkdir(exist_ok=True)
     outside = root.parent / "outside"
     outside.mkdir()
     link = root / "escape"
@@ -154,6 +158,36 @@ def test_local_server_files_reject_symlink_escape(client: TestClient) -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Path escapes the configured root"
+
+
+def test_server_files_routes_require_operator(client: TestClient) -> None:
+    register(client, "operator@example.com")
+    member = register(client, "member@example.com")
+
+    response = client.get(
+        "/api/server-files/status",
+        headers=authorization(member["access_token"]),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Operator access is required"
+
+
+def test_local_storage_save_path_enforces_limit_and_cleans_partial_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "teledrive_max_upload_bytes", 3)
+    source = tmp_path / "too-large.bin"
+    source.write_bytes(b"1234")
+    storage = LocalFileStorage()
+    storage.root = tmp_path / "storage"
+    storage.root.mkdir()
+
+    with pytest.raises(HTTPException, match="Content exceeds"):
+        asyncio.run(storage.save_path(source))
+
+    assert list(storage.root.iterdir()) == []
 
 
 def test_production_settings_reject_weak_secrets() -> None:
@@ -173,3 +207,13 @@ def test_production_settings_accept_strong_secrets() -> None:
     )
 
     assert settings.debug is False
+
+
+def test_dev_stack_status_is_available_in_debug(client: TestClient) -> None:
+    response = client.get("/api/dev/stack-status")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["api"] is True
+    assert "redis" in payload
+    assert "worker" in payload

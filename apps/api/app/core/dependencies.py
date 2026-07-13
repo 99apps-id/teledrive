@@ -44,3 +44,14 @@ async def get_current_user(
                 detail="CSRF token is missing or invalid",
             )
     return user
+
+
+async def require_operator(
+    user: UserModel = Depends(get_current_user),
+) -> UserModel:
+    if not user.is_operator:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operator access is required",
+        )
+    return user

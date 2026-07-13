@@ -1,4 +1,6 @@
 from functools import lru_cache
+from ipaddress import ip_network
+from urllib.parse import quote
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -9,7 +11,14 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:5173"
     api_url: str = "http://localhost:8000"
     database_url: str = "sqlite+aiosqlite:///./teledrive.db"
-    redis_url: str = "redis://localhost:6379/0"
+    # REDIS_URL remains available for external Redis providers. When omitted,
+    # the URL is safely assembled from the component settings below.
+    redis_url: str = ""
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_password: str = ""
+    redis_db: int = 0
+    trusted_proxy_cidrs: str = ""
     storage_temp_path: str = "./storage"
     jwt_secret: str = "change-me-in-production"
     encryption_key: str = "change-me-in-production"
@@ -17,6 +26,7 @@ class Settings(BaseSettings):
     teledrive_registration_enabled: bool | None = None
     teledrive_max_upload_bytes: int = 1024 * 1024 * 1024
     teledrive_max_archive_bytes: int = 2 * 1024 * 1024 * 1024
+    teledrive_max_editor_bytes: int = 5 * 1024 * 1024
 
     telegram_api_id: str = ""
     telegram_api_hash: str = ""
@@ -54,7 +64,18 @@ class Settings(BaseSettings):
         return self.debug
 
     @model_validator(mode="after")
-    def validate_production_secrets(self):
+    def configure_runtime_settings(self):
+        for cidr in self.trusted_proxy_cidrs.split(","):
+            if cidr.strip():
+                try:
+                    ip_network(cidr.strip(), strict=False)
+                except ValueError as error:
+                    raise ValueError(f"TRUSTED_PROXY_CIDRS contains an invalid CIDR: {cidr}") from error
+
+        if not self.redis_url:
+            password = f":{quote(self.redis_password, safe='')}@" if self.redis_password else ""
+            self.redis_url = f"redis://{password}{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
         if self.app_env.lower().strip() != "production":
             return self
         weak_values = {"", "change-me-in-production", "change-this-to-a-long-random-secret"}

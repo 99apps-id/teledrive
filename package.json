@@ -6,12 +6,19 @@
   "description": "Open-source self-hosted API-first file manager backed by a user's Telegram private storage channel.",
   "type": "module",
   "scripts": {
-    "dev": "npm-run-all --parallel dev:*",
-    "dev:api": "cd apps/api && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "dev": "npm-run-all --parallel dev:api dev:web dev:worker dev:beat",
+    "dev:full": "npm-run-all dev:redis dev",
+    "dev:clean": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/kill-dev-ports.ps1",
+    "dev:api": "cd apps/api && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8001",
     "dev:web": "npm --workspace apps/web run dev",
+    "dev:worker": "cd apps/api && python -m celery -A app.worker.tasks worker --loglevel=info --pool=solo -n teledrive-dev",
+    "dev:beat": "cd apps/api && python -m celery -A app.worker.tasks beat --loglevel=info",
+    "dev:redis": "docker compose up -d redis",
+    "dev:redis:down": "docker compose stop redis",
     "build": "npm run build --workspace apps/web && npm run build --workspace packages/shared",
     "typecheck": "npm run typecheck --workspace apps/web && npm run typecheck --workspace packages/shared",
     "lint": "npm run lint --workspace apps/web && npm run lint --workspace packages/shared",
+    "check": "npm run typecheck && cd apps/api && python -m pytest -q",
     "format": "prettier --write ."
   },
   "workspaces": [
