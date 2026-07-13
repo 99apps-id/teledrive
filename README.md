@@ -241,10 +241,14 @@ Generate distinct values for `JWT_SECRET` and `ENCRYPTION_KEY` in `.env`. Keep `
 
 ### Dev scripts
 
+Permanent delete, empty trash, Telegram cleanup, and recovery manifest jobs require **Redis** and the **Celery worker**. In local development, the recommended way to get Redis is Docker Desktop via `npm run dev:full`.
+
+`npm run dev` now checks Redis first. If Redis is down, it tries `docker compose up -d redis` automatically. If Docker is missing or Redis still cannot start, the command stops with install instructions instead of starting a broken worker stack.
+
 | Script | Purpose |
 | --- | --- |
 | `npm run dev:full` | Start Redis (Docker), API, web UI, worker, and Beat |
-| `npm run dev` | Start API, web UI, worker, and Beat when Redis is already running |
+| `npm run dev` | Verify Redis, auto-start it with Docker when possible, then start API/web/worker/Beat |
 | `npm run dev:clean` | Free stuck dev ports on Windows (`8001`, `5173`–`5175`) |
 | `npm run check` | Run TypeScript typecheck and API pytest suite |
 | `npm run build` | Build web and shared packages |
@@ -260,6 +264,8 @@ If Redis is already running:
 ```bash
 npm run dev
 ```
+
+This command verifies Redis first. If Redis is not running, TeleDrive tries to start it with Docker Compose. Install Docker Desktop when you need permanent delete and Telegram cleanup in local development.
 
 Defaults:
 

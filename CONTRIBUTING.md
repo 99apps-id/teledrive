@@ -35,16 +35,18 @@ Start development:
 
 ```bash
 cp .env.example .env   # first time only
-npm run dev
-```
-
-For the full local stack (Redis via Docker, API, web UI, Celery worker, and Beat scheduler):
-
-```bash
 npm run dev:full
 ```
 
-If Redis is already running on `localhost:6381`, `npm run dev` is enough.
+Use `npm run dev:full` when you need permanent delete, Telegram cleanup, or recovery jobs. It starts Redis through Docker Compose, then the API, web UI, worker, and Beat.
+
+If Redis is already running on `localhost:6381`:
+
+```bash
+npm run dev
+```
+
+`npm run dev` checks Redis first and tries to start it with Docker when Redis is down.
 
 On Windows, if ports are stuck after a crash:
 
