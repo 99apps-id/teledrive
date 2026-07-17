@@ -170,6 +170,16 @@ export interface UpdateStatus {
   details: string;
 }
 
+export interface WebDavStatus {
+  enabled: boolean;
+  mountPath: string;
+  auth: string;
+  cachePath: string;
+  cacheMaxBytes: number;
+  details: string;
+  rcloneExample: string;
+}
+
 interface PythonAuthUser {
   id: string;
   email: string;
@@ -266,6 +276,16 @@ interface PythonUpdateStatus {
   details: string;
 }
 
+interface PythonWebDavStatus {
+  enabled: boolean;
+  mount_path: string;
+  auth: string;
+  cache_path: string;
+  cache_max_bytes: number;
+  details: string;
+  rclone_example: string;
+}
+
 function mapDriveItem(item: PythonDriveItem): DriveItem {
   return {
     id: item.id,
@@ -339,6 +359,18 @@ function mapUpdateStatus(status: PythonUpdateStatus): UpdateStatus {
     publishedAt: status.published_at,
     checked: status.checked,
     details: status.details,
+  };
+}
+
+function mapWebDavStatus(status: PythonWebDavStatus): WebDavStatus {
+  return {
+    enabled: status.enabled,
+    mountPath: status.mount_path,
+    auth: status.auth,
+    cachePath: status.cache_path,
+    cacheMaxBytes: status.cache_max_bytes,
+    details: status.details,
+    rcloneExample: status.rclone_example,
   };
 }
 
@@ -675,6 +707,12 @@ export function getUpdateStatus() {
   return api
     .get<{ data: PythonUpdateStatus }>("/update/status")
     .then((response) => mapUpdateStatus(response.data.data));
+}
+
+export function getWebDavStatus() {
+  return api
+    .get<{ data: PythonWebDavStatus }>("/webdav/status")
+    .then((response) => mapWebDavStatus(response.data.data));
 }
 
 export function saveServerFilesConfig(payload: ServerFilesConfigPayload) {

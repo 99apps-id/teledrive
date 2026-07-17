@@ -1,6 +1,6 @@
 {
   "name": "teledrive",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "GPL-3.0-only",
   "description": "Open-source self-hosted API-first file manager backed by a user's Telegram private storage channel.",

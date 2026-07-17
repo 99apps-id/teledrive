@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     teledrive_releases_api_url: str = (
         "https://api.github.com/repos/99apps-id/teledrive/releases/latest"
     )
+    teledrive_webdav_enabled: bool = True
+    teledrive_mount_cache_path: str = ""
+    teledrive_mount_cache_max_bytes: int = 2 * 1024 * 1024 * 1024
 
     model_config = SettingsConfigDict(
         env_file="../../.env",

@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-17
+
+### Added
+
+- NesaRouter-aligned dark ops-console UI (OKLCH tokens, teal identity, copper warnings).
+- WebDAV mount at `/dav/` with Basic and Bearer auth (Roadmap V2).
+- Local mount cache with size-based eviction and background Telegram sync for WebDAV writes.
+- `GET /api/webdav/status` and Mount section in API status UI.
+- Design docs: `DESIGN.md` and updated `PRODUCT.md`.
+
+### Changed
+
+- Frontend visual theme is dark by default to match the 99apps self-hosted console family.
+
 ## [0.1.0] - 2026-07-13
 
 First public alpha release for a single trusted operator or small internal group.
@@ -29,4 +43,5 @@ First public alpha release for a single trusted operator or small internal group
 - API and worker production images use Python 3.11 and run as non-root users.
 - Deployment documentation describes the trusted-operator alpha model, TLS, resources, and backups.
 
+[0.2.0]: https://github.com/99apps-id/teledrive/releases/tag/v0.2.0
 [0.1.0]: https://github.com/99apps-id/teledrive/releases/tag/v0.1.0

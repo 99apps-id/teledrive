@@ -13,6 +13,7 @@ from app.api.files import create_files_router
 from app.api.server_files import router as server_files_router
 from app.api.storage import create_storage_router
 from app.api.system import router as system_router
+from app.api.webdav import router as webdav_router
 from app.core.config import settings
 from app.core.database import close_db, init_db
 from app.core.rate_limit import limiter
@@ -46,8 +47,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_url, "http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Request-ID"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "PROPFIND", "MKCOL", "MOVE", "HEAD"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Request-ID", "Depth", "Destination", "Overwrite"],
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
@@ -73,6 +74,7 @@ app.include_router(create_files_router(storage), prefix="/api")
 app.include_router(server_files_router, prefix="/api")
 app.include_router(create_storage_router(storage), prefix="/api")
 app.include_router(system_router, prefix="/api")
+app.include_router(webdav_router, prefix="/dav")
 
 
 @app.get("/health", tags=["System"])

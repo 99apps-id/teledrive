@@ -46,6 +46,16 @@ class DevStackStatus(BaseModel):
     worker: bool = False
 
 
+class WebDavStatus(BaseModel):
+    enabled: bool
+    mount_path: str
+    auth: str
+    cache_path: str
+    cache_max_bytes: int
+    details: str
+    rclone_example: str
+
+
 def _ping_redis(redis_url: str) -> bool:
     try:
         from redis import Redis
@@ -75,6 +85,38 @@ async def dev_stack_status():
         asyncio.to_thread(_ping_celery_worker),
     )
     return {"data": DevStackStatus(api=True, redis=redis_ok, worker=worker_ok)}
+
+
+@router.get("/webdav/status", response_model=dict[str, WebDavStatus])
+async def webdav_status():
+    from app.services.mount_cache import MountCacheService
+
+    cache = MountCacheService()
+    base = settings.api_url.rstrip("/")
+    # Prefer public API host; WebDAV is mounted at /dav on the same origin as the API.
+    if base.endswith("/api"):
+        origin = base[: -len("/api")]
+    else:
+        origin = base
+    mount_url = f"{origin}/dav/"
+    return {
+        "data": WebDavStatus(
+            enabled=settings.teledrive_webdav_enabled,
+            mount_path="/dav/",
+            auth="HTTP Basic (email:password) or Bearer JWT",
+            cache_path=str(cache.root),
+            cache_max_bytes=settings.teledrive_mount_cache_max_bytes,
+            details=(
+                "WebDAV mount is enabled for TeleDrive Storage (cloud-drive style)."
+                if settings.teledrive_webdav_enabled
+                else "WebDAV is disabled. Set TELEDRIVE_WEBDAV_ENABLED=true to enable."
+            ),
+            rclone_example=(
+                f'rclone config create teledrive webdav url "{mount_url}" '
+                'vendor other user "you@example.com" pass "your-password"'
+            ),
+        )
+    }
 
 
 @router.get("/update/status", response_model=dict[str, UpdateStatus])

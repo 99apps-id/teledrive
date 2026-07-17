@@ -14,7 +14,7 @@ TeleDrive provides an API-first web file manager where Telegram is only a storag
 
 ## Brand Personality
 
-Familiar, disciplined, practical. The product should feel trustworthy and operational rather than promotional.
+Familiar, disciplined, practical, operational. The product should feel trustworthy like a dark network operations console (aligned with NesaRouter) rather than promotional or chatty.
 
 ## Anti-references
 
@@ -27,6 +27,7 @@ Do not look like a Telegram client, chat app, marketing landing page, or decorat
 - Design for repeated desktop workflows first, with responsive fallbacks for smaller screens.
 - Make API-first architecture feel calm and inspectable, not technical for its own sake.
 - Use restrained product UI states: selected, hover, disabled, loading, warning, and ready.
+- Share the dark ops-console visual language with NesaRouter (near-black shell, teal identity, copper warnings) so 99apps self-hosted tools feel like one family.
 
 ## Accessibility & Inclusion
 

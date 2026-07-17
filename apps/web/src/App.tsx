@@ -71,6 +71,7 @@ import {
   getServerFilesStatus,
   getStorageStatus,
   getUpdateStatus,
+  getWebDavStatus,
   importServerFileToDrive,
   login,
   logout as endSession,
@@ -401,6 +402,14 @@ export function App() {
     retry: false,
   });
 
+  const webDavStatusQuery = useQuery({
+    queryKey: ["webdav-status"],
+    queryFn: getWebDavStatus,
+    enabled: Boolean(token) && sidePanel === "api",
+    staleTime: 60 * 1000,
+    retry: false,
+  });
+
   const serverFilesQuery = useQuery({
     queryKey: ["server-files", serverPath],
     queryFn: () => listServerFiles(serverPath),
@@ -434,6 +443,7 @@ export function App() {
   const status = storageQuery.data;
   const serverStatus = serverStatusQuery.data;
   const updateStatus = updateStatusQuery.data;
+  const webDavStatus = webDavStatusQuery.data;
   const serverItems = serverFilesQuery.data ?? [];
   const serverSelectedItem = serverSelectedPath
     ? serverItems.find((item) => item.path === serverSelectedPath)
@@ -3138,6 +3148,41 @@ export function App() {
                     <dd>{status?.details ?? "Checking..."}</dd>
                   </div>
                 </dl>
+                <div className="system-heading mount-heading">
+                  <HardDrive size={22} />
+                  <div>
+                    <h2>WebDAV mount</h2>
+                    <p>Mount TeleDrive Storage as a network drive (cloud-drive style).</p>
+                  </div>
+                </div>
+                <dl className="system-list">
+                  <div>
+                    <dt>Status</dt>
+                    <dd>{webDavStatus?.enabled ? "Enabled" : webDavStatus ? "Disabled" : "Checking..."}</dd>
+                  </div>
+                  <div>
+                    <dt>Path</dt>
+                    <dd>{webDavStatus?.mountPath ?? "/dav/"}</dd>
+                  </div>
+                  <div>
+                    <dt>Auth</dt>
+                    <dd>{webDavStatus?.auth ?? "Basic or Bearer"}</dd>
+                  </div>
+                  <div>
+                    <dt>Cache</dt>
+                    <dd>{webDavStatus?.cachePath ?? "…"}</dd>
+                  </div>
+                  <div>
+                    <dt>Notes</dt>
+                    <dd>{webDavStatus?.details ?? "Checking..."}</dd>
+                  </div>
+                </dl>
+                {webDavStatus?.rcloneExample && (
+                  <label className="mount-command">
+                    rclone example
+                    <textarea readOnly rows={3} value={webDavStatus.rcloneExample} />
+                  </label>
+                )}
                 {updateStatus?.updateAvailable && (
                   <a
                     className="button wide update-link"

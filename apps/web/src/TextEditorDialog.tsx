@@ -12,6 +12,7 @@ import { css } from "@codemirror/lang-css";
 import { markdown } from "@codemirror/lang-markdown";
 import { python } from "@codemirror/lang-python";
 import { sql } from "@codemirror/lang-sql";
+import { oneDark } from "@codemirror/theme-one-dark";
 import type { SaveTextFilePayload, TextFileContent } from "./api";
 
 type EditorMode = "text" | "code" | "markdown";
@@ -121,6 +122,7 @@ export function TextEditorDialog({
           closeBrackets(),
           autocompletion(),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          oneDark,
           keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, ...closeBracketsKeymap, indentWithTab]),
           syntaxCompartment.current.of(syntaxExtension(syntax, fileName)),
           editableCompartment.current.of(EditorView.editable.of(!saving)),

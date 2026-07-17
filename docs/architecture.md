@@ -109,4 +109,5 @@ The metadata repository is database-backed with SQLAlchemy async. The intended p
 1. Automatic user-scoped sync scheduling after upload. Done in the API request path via FastAPI background tasks; Celery workers handle deletion retries and manifest work.
 2. Local development stack health endpoint at `GET /api/dev/stack-status` (debug only).
 3. Add download streaming from Telegram when bytes are no longer local.
-4. Add provider repair jobs.
+4. WebDAV mount at `/dav/` with local mount cache and background sync (Roadmap V2). Optional FUSE adapters remain future work.
+5. Add provider repair jobs.

@@ -545,10 +545,29 @@ Server Files and status:
 ### V2
 
 - Mount TeleDrive as an additional drive on a VPS, starting with WebDAV.
-- Add local cache and background sync for mounted-drive workflows.
+- Local mount cache and background sync for mounted-drive workflows.
 - Explore optional FUSE or rclone adapters after WebDAV is stable.
 
-TeleDrive mount support is planned as cloud-drive style file access, not block storage. It is intended for documents, media, archives, and backups, not active databases, VM images, or Docker volumes.
+TeleDrive mount support is cloud-drive style file access, not block storage. It is intended for documents, media, archives, and backups, not active databases, VM images, or Docker volumes.
+
+#### WebDAV mount
+
+With `TELEDRIVE_WEBDAV_ENABLED=true` (default), TeleDrive exposes WebDAV at `/dav/` on the API host.
+
+Authenticate with HTTP Basic (`email:password`) or `Authorization: Bearer <JWT>`.
+
+Example with rclone:
+
+```bash
+rclone config create teledrive webdav \
+  url "http://127.0.0.1:8001/dav/" \
+  vendor other \
+  user "you@example.com" \
+  pass "your-password"
+rclone ls teledrive:
+```
+
+Windows / macOS can map `/dav/` as a network location when the API is reachable over HTTPS behind a reverse proxy. Cold reads may pull from Telegram and are slower than local disk; recent files are served from the local mount cache when available.
 
 ## Status
 

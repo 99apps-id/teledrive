@@ -58,6 +58,39 @@ class DriveRepository:
     async def get(self, item_id: str) -> DriveItem:
         return self._to_schema(await self._get_model(item_id))
 
+    async def get_child(self, parent_id: str | None, name: str) -> DriveItem | None:
+        result = await self.session.scalar(
+            select(DriveItemModel)
+            .where(DriveItemModel.user_id == self.user_id)
+            .where(DriveItemModel.deleted_at.is_(None))
+            .where(
+                DriveItemModel.parent_id.is_(None)
+                if parent_id is None
+                else DriveItemModel.parent_id == parent_id
+            )
+            .where(DriveItemModel.name == name)
+            .order_by(DriveItemModel.created_at)
+        )
+        return self._to_schema(result) if result is not None else None
+
+    async def resolve_path(self, path: str) -> DriveItem | None:
+        """Resolve a slash-separated path from the drive root.
+
+        Returns ``None`` for the virtual root collection. Raises 404 when a
+        path segment is missing.
+        """
+        segments = [part for part in path.strip("/").split("/") if part]
+        if not segments:
+            return None
+        parent_id: str | None = None
+        current: DriveItem | None = None
+        for segment in segments:
+            current = await self.get_child(parent_id, segment)
+            if current is None:
+                raise HTTPException(status_code=404, detail="Path not found")
+            parent_id = current.id
+        return current
+
     async def create_folder(self, name: str, parent_id: str | None = None) -> DriveItem:
         clean_name = name.strip()
         self._assert_name(clean_name)
@@ -313,6 +346,33 @@ class DriveRepository:
         for root_id in trashed_roots:
             models.extend(self._collect_subtree(root_id, by_id, by_parent, seen))
         return await self._delete_collected_models(models, commit=commit)
+
+    async def replace_file_content(
+        self,
+        item_id: str,
+        *,
+        size: int,
+        mime_type: str | None,
+        remote_id: str,
+    ) -> DriveItem:
+        item = await self._get_model(item_id)
+        if item.kind != "file":
+            raise HTTPException(status_code=405, detail="Cannot replace a folder")
+        item.size = size
+        item.mime_type = mime_type
+        item.storage_remote_id = remote_id
+        item.sync_status = (
+            "synced"
+            if remote_id.startswith("telegram://")
+            else "local"
+            if remote_id.startswith("local://")
+            else "pending_upload"
+        )
+        item.sync_error = None
+        item.updated_at = datetime.now(timezone.utc)
+        await self.session.commit()
+        await self.session.refresh(item)
+        return self._to_schema(item)
 
     async def update(
         self,
