@@ -9,8 +9,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0005_add_telegram_login_state"
-down_revision = "0004_add_telegram_api_credentials"
+revision = "0005"
+down_revision = "0004"
 branch_labels = None
 depends_on = None
 

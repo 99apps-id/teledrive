@@ -18,6 +18,7 @@ import {
   LayoutList,
   Lock,
   LogOut,
+  Moon,
   MoreHorizontal,
   PanelRight,
   RefreshCw,
@@ -25,6 +26,7 @@ import {
   Server,
   Shield,
   SlidersHorizontal,
+  Sun,
   Trash2,
   UploadCloud,
   CloudUpload,
@@ -117,6 +119,7 @@ import { AuthScreen, type AuthMode } from "./AuthScreen";
 import { DeletionJobBanners } from "./DeletionJobBanners";
 import { DevHealthBadge } from "./DevHealthBadge";
 import { TextEditorDialog } from "./TextEditorDialog";
+import { applyTheme, getStoredTheme, type ThemeMode } from "./theme";
 
 function formatBytes(size: number) {
   if (size === 0) return "-";
@@ -246,6 +249,7 @@ export function App() {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [accountMessage, setAccountMessage] = useState("");
+  const [theme, setTheme] = useState<ThemeMode>(() => getStoredTheme());
   const [recoveryMessage, setRecoveryMessage] = useState("");
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
   const [statusRefreshedAt, setStatusRefreshedAt] = useState<Date | null>(null);
@@ -1787,12 +1791,23 @@ export function App() {
             <Trash2 size={16} />
             Trash Bin
           </button>
-          {meQuery.data?.isOperator && (
+          {meQuery.data?.isOperator ? (
             <button
               type="button"
               data-testid="nav-server-files"
               className={`tree-item ${sidePanel === "server" ? "active" : ""}`}
               onClick={(event) => handleTreeAction(event, openServerFiles)}
+            >
+              <Server size={16} />
+              Server Files
+            </button>
+          ) : (
+            <button
+              type="button"
+              data-testid="nav-server-files"
+              className="tree-item"
+              disabled
+              title="Server Files is available to the operator account"
             >
               <Server size={16} />
               Server Files
@@ -1854,6 +1869,20 @@ export function App() {
         </section>
         <section className="session-panel">
           <strong>{meQuery.data?.email ?? "Signed in"}</strong>
+          <button
+            className="tool-button"
+            type="button"
+            aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            title={theme === "dark" ? "Light theme" : "Dark theme"}
+            onClick={() => {
+              const next = theme === "dark" ? "light" : "dark";
+              applyTheme(next);
+              setTheme(next);
+            }}
+          >
+            {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
+            {theme === "dark" ? "Light theme" : "Dark theme"}
+          </button>
           <button
             className="tool-button"
             onClick={() => setSidePanel("setup")}
@@ -2745,6 +2774,33 @@ export function App() {
                   <ArrowLeft size={16} />
                   Back to files
                 </button>
+                <div className="theme-toggle" role="group" aria-label="Appearance">
+                  <span>Appearance</span>
+                  <div className="theme-toggle-options">
+                    <button
+                      type="button"
+                      className={`theme-option ${theme === "dark" ? "active" : ""}`}
+                      onClick={() => {
+                        applyTheme("dark");
+                        setTheme("dark");
+                      }}
+                    >
+                      <Moon size={16} aria-hidden="true" />
+                      Dark
+                    </button>
+                    <button
+                      type="button"
+                      className={`theme-option ${theme === "light" ? "active" : ""}`}
+                      onClick={() => {
+                        applyTheme("light");
+                        setTheme("light");
+                      }}
+                    >
+                      <Sun size={16} aria-hidden="true" />
+                      Light
+                    </button>
+                  </div>
+                </div>
                 <form
                   className="account-form"
                   onSubmit={(event) => {

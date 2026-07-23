@@ -10,8 +10,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0010_add_deletion_jobs_and_manifest_snapshots"
-down_revision = "0009_add_operator_and_app_settings"
+revision = "0010"
+down_revision = "0009"
 branch_labels = None
 depends_on = None
 

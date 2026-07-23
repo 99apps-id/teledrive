@@ -1,8 +1,9 @@
+import io
 from pathlib import Path
 from uuid import uuid4
 
 import aiofiles
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException, Request, UploadFile
 
 from app.core.config import settings
 
@@ -46,6 +47,37 @@ class LocalFileStorage:
         async with aiofiles.open(target, "wb") as output:
             await output.write(content)
         return f"local://{object_id}", len(content)
+
+    async def save_upload_stream(
+        self, request: Request, max_bytes: int
+    ) -> tuple[str, int]:
+        """Stream request body to disk with a byte cap, no full-RAM buffer."""
+        object_id = str(uuid4())
+        target = self._path_for(object_id)
+        size = 0
+        try:
+            async with aiofiles.open(target, "wb") as output:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > max_bytes:
+                        target.unlink(missing_ok=True)
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Upload exceeds the {max_bytes} byte limit",
+                        )
+                    await output.write(chunk)
+        except HTTPException:
+            raise
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        return f"local://{object_id}", size
+
+    def resolve(self, remote_id: str | None) -> Path | None:
+        if not remote_id or not remote_id.startswith("local://"):
+            return None
+        path = self._path_for(remote_id.removeprefix("local://"))
+        return path if path.exists() else None
 
     async def save_path(self, source: Path) -> tuple[str, int]:
         object_id = str(uuid4())

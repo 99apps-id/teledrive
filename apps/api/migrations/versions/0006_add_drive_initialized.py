@@ -9,8 +9,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0006_add_drive_initialized"
-down_revision = "0005_add_telegram_login_state"
+revision = "0006"
+down_revision = "0005"
 branch_labels = None
 depends_on = None
 

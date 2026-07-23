@@ -8,8 +8,8 @@ Create Date: 2026-07-11
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0003_add_users_and_file_owners"
-down_revision = "0002_add_sync_fields"
+revision = "0003"
+down_revision = "0002"
 branch_labels = None
 depends_on = None
 

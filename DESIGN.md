@@ -6,7 +6,7 @@ TeleDrive is a self-hosted web file manager for Telegram-backed private storage 
 
 ## Visual Direction
 
-Dark network operations console shared with NesaRouter: near-black shell, layered graphite panels, measured teal identity, copper warning accents, and compact surfaces built for scanning. The feeling should be closer to a control room / file gateway than a light desktop skin or a Telegram client.
+Dark network operations console shared with NesaRouter by default: near-black shell, layered graphite panels, measured teal identity, copper warning accents, and compact surfaces built for scanning. Users can switch to a light appearance from Account settings or the session panel; light mode keeps the same structure with a cool off-white shell and darker teal primary.
 
 ## Color Tokens
 

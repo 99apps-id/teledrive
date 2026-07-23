@@ -10,8 +10,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0008_add_server_files_config"
-down_revision = "0007_add_trash_state"
+revision = "0008"
+down_revision = "0007"
 branch_labels = None
 depends_on = None
 

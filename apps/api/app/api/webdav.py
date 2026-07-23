@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import posixpath
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import format_datetime
@@ -123,7 +124,15 @@ async def get_webdav_user(
                 headers={"WWW-Authenticate": 'Basic realm="TeleDrive WebDAV"'},
             ) from error
         result = await session.scalar(select(UserModel).where(UserModel.email == email.strip().lower()))
-        if result is None or not verify_password(password, result.password_hash):
+        if result is None:
+            # Constant-time dummy verify to prevent user enumeration via timing
+            verify_password(password, "$2b$12$0000000000000000000000000000000000000000000000")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password",
+                headers={"WWW-Authenticate": 'Basic realm="TeleDrive WebDAV"'},
+            )
+        if not verify_password(password, result.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password",
@@ -350,16 +359,9 @@ async def _handle_put(
             raise HTTPException(status_code=409, detail="Parent collection does not exist")
         parent_id = parent.id
 
-    body = await request.body()
-    if len(body) > settings.teledrive_max_upload_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Upload exceeds the {settings.teledrive_max_upload_bytes} byte limit",
-        )
-
     existing = await repo.get_child(parent_id, name)
-    remote_id, size = await local_storage.save_bytes(body)
     content_type = request.headers.get("Content-Type") or "application/octet-stream"
+    remote_id, size = await local_storage.save_upload_stream(request, settings.teledrive_max_upload_bytes)
 
     created = False
     if existing is None:
@@ -375,7 +377,10 @@ async def _handle_put(
             remote_id=remote_id,
         )
 
-    await mount_cache.put_bytes(item.id, body)
+    # Stream file to mount cache from stored file
+    stored_path = local_storage.resolve(remote_id)
+    if stored_path and stored_path.exists():
+        await mount_cache.put_path(item.id, stored_path)
     storage_status = await telegram_storage_for_user(user).status()
     if storage_status.ready:
         _schedule_sync(item.id, user.id)
@@ -429,7 +434,14 @@ async def _handle_move(request: Request, repo: DriveRepository, path: str) -> Re
     if item is None:
         raise HTTPException(status_code=403, detail="Cannot move root")
 
-    segments = [part for part in dest_path.strip("/").split("/") if part]
+    # Prevent path traversal in Destination header
+    normalized = posixpath.normpath(dest_path.lstrip("/"))
+    if normalized in {"", "."}:
+        raise HTTPException(status_code=403, detail="Invalid destination")
+    if normalized == ".." or normalized.startswith("../") or "/../" in normalized:
+        raise HTTPException(status_code=400, detail="Destination path escapes the drive root")
+
+    segments = [part for part in normalized.strip("/").split("/") if part]
     if not segments:
         raise HTTPException(status_code=403, detail="Invalid destination")
     parent_segments, name = segments[:-1], segments[-1]
