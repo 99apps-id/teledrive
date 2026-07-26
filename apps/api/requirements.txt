@@ -1,35 +1,35 @@
-fastapi==0.139.0
-uvicorn[standard]==0.34.0
-pydantic==2.10.3
-pydantic-settings==2.7.0
+fastapi==0.140.0
+uvicorn[standard]==0.51.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
 
 # Database and Alembic migrations. SQLite supports local development; the
 # production Docker deployment uses PostgreSQL and runs migrations before API startup.
-sqlalchemy==2.0.36
-asyncpg==0.30.0
-aiosqlite==0.20.0
-alembic==1.14.0
+sqlalchemy==2.0.51
+asyncpg==0.31.0
+aiosqlite==0.22.1
+alembic==1.18.5
 
 # Worker/queue path for upload, download, and sync jobs.
-redis==5.2.1
-celery==5.4.0
+redis==8.0.1
+celery==5.6.3
 
 # Telegram user-account storage uses MTProto through the private-channel adapter.
 # TeleDrive remains a file manager and does not expose Telegram social features.
-telethon==1.38.1
+telethon==1.44.0
 
 PyJWT[crypto]==2.13.0
-bcrypt==4.2.1
-python-multipart==0.0.31
-cryptography==48.0.1
+bcrypt==5.0.0
+python-multipart==0.0.32
+cryptography==49.0.0
 paramiko==5.0.0
 httpx==0.28.1
-aiofiles==24.1.0
-structlog==24.4.0
+aiofiles==25.1.0
+structlog==26.1.0
 slowapi==0.1.10
-email-validator==2.2.0
-charset-normalizer==3.4.4
+email-validator==2.3.0
+charset-normalizer==3.4.9
 
-pytest==9.0.3
+pytest==9.1.1
 pytest-asyncio==1.4.0
-watchfiles==1.0.3
+watchfiles==1.2.0
